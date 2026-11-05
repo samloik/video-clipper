@@ -209,6 +209,7 @@ def _download(
             bridge_url,
         )
 
+    cookie_warning(cfg)
     log.info("Скачивание %s (макс. %sp)", url, height)
     try:
         try:
@@ -231,7 +232,7 @@ def _download(
             opts["proxy"] = cfg.proxy
             info = extract(url, opts)
     except Exception as exc:  # yt-dlp raises its own DownloadError hierarchy
-        raise SourceError(f"Не удалось скачать {url}: {exc}") from exc
+        raise SourceError(f"Не удалось скачать {url}: {_with_cookie_hint(exc, cfg)}") from exc
     finally:
         for key, value in saved_env.items():
             if value is None:
@@ -262,6 +263,48 @@ def _ytdlp_extract(url: str, opts: dict[str, Any]) -> dict[str, Any]:
 
     with yt_dlp.YoutubeDL(opts) as ydl:
         return ydl.extract_info(url, download=True)
+
+
+COOKIE_SIGNS = (
+    "sign in to confirm",
+    "cookies",
+    "not a bot",
+    "login required",
+    "private video",
+    "members-only",
+)
+
+
+def cookies_path(cfg: Config) -> Path | None:
+    return Path(cfg.cookies).expanduser() if cfg.cookies else None
+
+
+def cookie_warning(cfg: Config) -> None:
+    """Warn (once per run) when the cookies file looks stale."""
+    path = cookies_path(cfg)
+    if not path or not path.is_file():
+        return
+    age_days = (time.time() - path.stat().st_mtime) / 86400
+    if age_days > 30:
+        log.warning(
+            "Файл cookies не менялся %.0f дн. — если YouTube просит авторизацию, обнови его: %s",
+            age_days,
+            path,
+        )
+
+
+def _with_cookie_hint(exc: Exception, cfg: Config) -> str:
+    message = str(exc)
+    lowered = message.lower()
+    if any(sign in lowered for sign in COOKIE_SIGNS):
+        path = cookies_path(cfg)
+        return (
+            f"{message}\n\nПохоже, нужны свежие cookies. Экспортируй их из браузера "
+            f"(расширение «Get cookies.txt LOCALLY») и положи в {path}. "
+            f"yt-dlp сам дописывает в этот файл обновлённые cookie, но вход в аккаунт "
+            f"он не восстанавливает."
+        )
+    return message
 
 
 def _clear_partials(cache_dir: Path) -> None:

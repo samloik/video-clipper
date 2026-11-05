@@ -57,6 +57,49 @@ class TestLocalSource:
             prepare_source(str(tmp_path / "nope.mp4"), load_config(None))
 
 
+class TestCookieHints:
+    def test_hint_added_for_signin_error(self, tmp_path):
+        from video_clipper.source import _with_cookie_hint
+
+        cfg = load_config(None).with_overrides(cookies=str(tmp_path / "c.txt"))
+        msg = _with_cookie_hint(
+            RuntimeError("ERROR: [youtube] x: Sign in to confirm you're not a bot"), cfg
+        )
+        assert "Экспортируй их из браузера" in msg
+        assert str(tmp_path / "c.txt") in msg
+
+    def test_plain_error_untouched(self):
+        from video_clipper.source import _with_cookie_hint
+
+        msg = _with_cookie_hint(RuntimeError("network unreachable"), load_config(None))
+        assert msg == "network unreachable"
+
+    def test_stale_cookie_warning(self, tmp_path, caplog):
+        import os
+        import time as _time
+
+        from video_clipper.source import cookie_warning
+
+        path = tmp_path / "cookies.txt"
+        path.write_text("# Netscape HTTP Cookie File\n", encoding="utf-8")
+        old = _time.time() - 40 * 86400
+        os.utime(path, (old, old))
+        cfg = load_config(None).with_overrides(cookies=str(path))
+        with caplog.at_level("WARNING"):
+            cookie_warning(cfg)
+        assert "не менялся" in caplog.text
+
+    def test_fresh_cookies_no_warning(self, tmp_path, caplog):
+        from video_clipper.source import cookie_warning
+
+        path = tmp_path / "cookies.txt"
+        path.write_text("# Netscape HTTP Cookie File\n", encoding="utf-8")
+        cfg = load_config(None).with_overrides(cookies=str(path))
+        with caplog.at_level("WARNING"):
+            cookie_warning(cfg)
+        assert caplog.text == ""
+
+
 class TestShiftSegments:
     def test_shift_for_section_file(self):
         from video_clipper.source import shift_segments

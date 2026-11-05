@@ -437,6 +437,14 @@ def handle_message(bot, cfg: Config, message: dict, clipper=None) -> None:
             lines.append(f"{label}: {len(items)} файл(ов), {total:.1f} МБ")
             for item in items[:10]:
                 lines.append(f"  · {item['name']} ({item['age_minutes']} мин)")
+        from .source import cookies_path
+
+        cookies = cookies_path(cfg)
+        if cookies and cookies.is_file():
+            age = (time.time() - cookies.stat().st_mtime) / 86400
+            lines.append(f"cookies: обновлены {age:.1f} дн. назад ({cookies})")
+        else:
+            lines.append("cookies: файла нет — YouTube может требовать авторизацию")
         lines.append(f"Удаление через {cfg.retention_minutes} мин тишины")
         bot.send_message(chat_id, "\n".join(lines))
         return
