@@ -137,7 +137,12 @@ def _download(
 
     duration = float(meta.get("duration") or 0.0)
     opts = dict(opts)
-    if segments and duration > 0 and _coverage(segments, duration) <= SECTION_COVERAGE:
+    if (
+        cfg.use_sections
+        and segments
+        and duration > 0
+        and _coverage(segments, duration) <= SECTION_COVERAGE
+    ):
         opts["download_ranges"] = _build_download_ranges(segments)
         opts["force_keyframes_at_cuts"] = True
         log.info(

@@ -24,6 +24,7 @@ DEFAULTS: dict[str, Any] = {
     "ffmpeg_path": "ffmpeg",
     "ffprobe_path": "ffprobe",
     "keep_source": False,
+    "use_sections": False,
     "gui_host": "127.0.0.1",
     "gui_port": 8765,
     "log_file": "./video-clipper.log",
@@ -46,6 +47,7 @@ class Config:
     ffmpeg_path: str
     ffprobe_path: str
     keep_source: bool
+    use_sections: bool
     gui_host: str
     gui_port: int
     log_file: Path
@@ -78,6 +80,7 @@ def _from_mapping(data: dict[str, Any]) -> Config:
         ffmpeg_path=str(merged["ffmpeg_path"]),
         ffprobe_path=str(merged["ffprobe_path"]),
         keep_source=bool(merged["keep_source"]),
+        use_sections=bool(merged["use_sections"]),
         gui_host=str(merged["gui_host"]),
         gui_port=int(merged["gui_port"]),
         log_file=Path(str(merged["log_file"])).expanduser(),

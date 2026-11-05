@@ -77,9 +77,10 @@ class TestDownload:
                 "requested_downloads": [{"filepath": str(sample_video)}],
             }
 
+        cfg = load_config(cfg_file).with_overrides(use_sections=True)
         src = prepare_source(
             "https://youtu.be/xyz",
-            load_config(cfg_file),
+            cfg,
             segments=[(10, 20)],
             downloader=fake_downloader,
         )
@@ -91,6 +92,20 @@ class TestDownload:
         assert "480" in download_opts["format"]
         # 10 s out of 600 s coverage → only sections are fetched
         assert "download_ranges" in download_opts
+
+    def test_sections_are_off_by_default(self, sample_video, tmp_path):
+        """Section downloads hang on some sites, so they stay opt-in."""
+        seen: list[dict] = []
+
+        def fake_downloader(url, opts):
+            seen.append(opts)
+            if opts.get("skip_download"):
+                return {"duration": 600}
+            return {"requested_downloads": [{"filepath": str(sample_video)}]}
+
+        cfg = load_config(None).with_overrides(cache_dir=tmp_path / "cache")
+        prepare_source("https://youtu.be/x", cfg, segments=[(10, 20)], downloader=fake_downloader)
+        assert "download_ranges" not in seen[-1]
 
     def test_full_download_when_coverage_is_large(self, sample_video, tmp_path):
         def fake_downloader(url, opts):

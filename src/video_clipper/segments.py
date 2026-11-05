@@ -7,6 +7,7 @@ import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 from .timecode import filename_timecode, format_timecode, parse_timecode
 
@@ -42,13 +43,20 @@ def slugify(text: str, fallback: str = "video") -> str:
 
 
 def source_slug(source: str) -> str:
-    """File stem for a local path, last URL path part (or host) for a URL."""
+    """File stem for a local path, a useful id for a URL.
+
+    Prefers ``?v=`` (YouTube watch links), then the last path part, which covers
+    ``youtu.be/<id>``, ``/shorts/<id>`` and ``tiktok.com/@user/video/<id>``.
+    """
     if "://" in source:
-        tail = source.rstrip("/").split("/")[-1]
-        tail = tail.split("?")[0].split("#")[0]
-        if not tail or "." in tail[:1]:
-            tail = source.split("://", 1)[1].split("/")[0]
-        return slugify(tail, "clip")
+        parsed = urlparse(source)
+        video_id = parse_qs(parsed.query).get("v", [""])[0]
+        if video_id:
+            return slugify(video_id, "clip")
+        parts = [p for p in parsed.path.split("/") if p]
+        if parts:
+            return slugify(parts[-1], "clip")
+        return slugify(parsed.netloc, "clip")
     return slugify(Path(source).stem, "clip")
 
 

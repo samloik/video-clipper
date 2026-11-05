@@ -144,5 +144,15 @@ class TestNames:
     def test_source_slug_url(self):
         assert source_slug("https://youtu.be/dQw4w9WgXcQ") == "dqw4w9wgxcq"
 
+    def test_source_slug_youtube_watch_uses_v_param(self):
+        assert source_slug("https://www.youtube.com/watch?v=jNQXAC9IVRw") == "jnqxac9ivrw"
+        assert source_slug("https://www.youtube.com/watch?v=jNQXAC9IVRw&t=42s") == "jnqxac9ivrw"
+
+    def test_source_slug_youtube_shorts(self):
+        assert source_slug("https://www.youtube.com/shorts/AbCdEf12345") == "abcdef12345"
+
+    def test_source_slug_tiktok(self):
+        assert source_slug("https://www.tiktok.com/@user/video/7300000000000000000") == "7300000000000000000"
+
     def test_source_slug_cyrillic(self):
         assert source_slug("/tmp/Отпуск 2026.mp4") == "otpusk_2026"
