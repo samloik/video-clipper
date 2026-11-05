@@ -10,6 +10,7 @@ from typing import Any, Callable, Iterable
 
 from .config import Config
 from .probe import MediaInfo, probe_media
+from .storage import find_cached_source
 
 log = logging.getLogger("video_clipper")
 
@@ -73,6 +74,18 @@ def prepare_source(
             raise FileNotFoundError(f"Файл не найден: {path}")
         return Source(path=path, title=path.stem, is_temporary=False,
                       info=probe_media(str(path), cfg.ffprobe_path))
+
+    # Same link again inside the retention window: reuse the download instead of
+    # fetching it twice (the bot session relies on this).
+    cached = find_cached_source(cfg.cache_dir, source, cfg.retention_minutes)
+    if cached is not None:
+        return Source(
+            path=cached,
+            title=cached.stem,
+            is_temporary=False,
+            info=probe_media(str(cached), cfg.ffprobe_path),
+            url=source,
+        )
 
     return _download(source, cfg, segments or [], keep_source, downloader)
 

@@ -19,6 +19,7 @@ dev = ["pytest>=8.0"]
 [project.scripts]
 video-clipper = "video_clipper.cli:main"
 video-clipper-gui = "video_clipper.gui:main"
+video-clipper-bot = "video_clipper.bot:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/video_clipper"]

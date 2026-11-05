@@ -16,6 +16,7 @@ from .segments import (
     validate_segments,
 )
 from .source import is_url, prepare_source
+from .storage import sweep, touch
 
 log = logging.getLogger("video_clipper")
 
@@ -32,6 +33,7 @@ def run_pipeline(args: Any, cfg: Config) -> list[ClipResult]:
     dry_run = bool(getattr(args, "dry_run", False))
     keep_source = bool(getattr(args, "keep_source", False)) or cfg.keep_source
     source_value = str(args.source)
+    sweep([cfg.cache_dir], cfg.retention_minutes)
     slug = source_slug(source_value)
     out_dir = Path(cfg.output_dir).expanduser()
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -79,8 +81,10 @@ def run_pipeline(args: Any, cfg: Config) -> list[ClipResult]:
             )
         return results
     finally:
-        if not keep_source:
+        if src.is_temporary and not keep_source:
             src.cleanup()
+        else:
+            touch(src.path)
 
 
 def _planned(slug: str, seg: Segment, out_dir: Path, fast: bool, index: int, total: int) -> ClipResult:
