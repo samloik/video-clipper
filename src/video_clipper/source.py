@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -157,18 +158,29 @@ def _download(
     extract = downloader or _ytdlp_extract
 
     # Metadata first: it tells us whether fetching only the requested sections
-    # saves bandwidth (skip_download keeps this cheap).
+    # saves bandwidth (skip_download keeps this cheap). Site throttling makes a
+    # single attempt flaky, and losing the duration means an expensive full
+    # download — so it is retried.
     meta: dict[str, Any] = {}
-    try:
-        meta = extract(url, {**opts, "skip_download": True}) or {}
-    except Exception as exc:  # metadata failure is not fatal, the download may still work
-        log.debug("Не удалось получить метаданные %s: %s", url, exc)
+    for attempt in range(3):
+        try:
+            meta = extract(url, {**opts, "skip_download": True}) or {}
+            if meta.get("duration"):
+                break
+        except Exception as exc:
+            log.warning("Метаданные не получены (попытка %d/3): %s", attempt + 1, exc)
+            if attempt < 2:
+                time.sleep(2 * (attempt + 1))
 
     duration = float(meta.get("duration") or 0.0)
     opts = dict(opts)
-    sections = bool(
-        segments and duration > 0 and _coverage(segments, duration) <= SECTION_COVERAGE
+    # Unknown duration: sections are still the cheaper bet for a short request,
+    # and a failure falls back to the full download below.
+    sections = bool(segments) and (
+        duration == 0 or _coverage(segments, duration) <= SECTION_COVERAGE
     )
+    if sections and duration == 0:
+        log.info("Длительность видео неизвестна — пробую скачать только участки")
 
     # Section downloads are cut by ffmpeg, which cannot use SOCKS5; a local
     # HTTP→SOCKS bridge makes ffmpeg work. Everything falls back to a full
