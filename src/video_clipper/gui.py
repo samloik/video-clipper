@@ -79,6 +79,9 @@ PAGE = """<!doctype html>
     <label style="flex-direction:row;align-items:center;gap:8px;color:#e7e9ee">
       <input id="fast" type="checkbox"> быстро, без перекодирования
     </label>
+    <label style="flex-direction:row;align-items:center;gap:8px;color:#e7e9ee">
+      <input id="vertical" type="checkbox"> вертикально 9:16
+    </label>
     <button id="go">Нарезать</button>
   </div>
 
@@ -123,7 +126,8 @@ document.getElementById('go').addEventListener('click', async () => {
     source,
     start: document.getElementById('start').value.trim(),
     end: document.getElementById('end').value.trim(),
-    fast: document.getElementById('fast').checked
+    fast: document.getElementById('fast').checked,
+    vertical: document.getElementById('vertical').checked
   };
   const btn = document.getElementById('go'); btn.disabled = true;
   statusEl.textContent = 'Запускаю...';
@@ -190,10 +194,17 @@ def _run_job(
     fast: bool,
     cfg: Config,
     clipper: Callable[..., list[ClipResult]],
+    vertical: bool = False,
 ) -> None:
     try:
         _job_update(job_id, message="Готовлю источник...")
-        results = clipper(source, segments, fast, cfg, lambda msg: _job_update(job_id, message=msg))
+        try:
+            results = clipper(
+                source, segments, fast, cfg, lambda msg: _job_update(job_id, message=msg),
+                vertical=vertical,
+            )
+        except TypeError:  # a custom clipper without the vertical parameter (tests)
+            results = clipper(source, segments, fast, cfg, lambda msg: _job_update(job_id, message=msg))
         payload = []
         files = []
         for res in results:
@@ -212,9 +223,17 @@ def _run_job(
         _job_update(job_id, state="error", error=str(exc), message="")
 
 
-def default_clipper(source: str, segments: list[Segment], fast: bool, cfg: Config, progress=None) -> list[ClipResult]:
+def default_clipper(
+    source: str,
+    segments: list[Segment],
+    fast: bool,
+    cfg: Config,
+    progress=None,
+    vertical: bool = False,
+    layout: str = "crop",
+) -> list[ClipResult]:
     """Download (if needed), validate and cut — the same path the CLI uses."""
-    from .cut import cut_segment
+    from .cut import cut_segment, vertical_name
     from .source import prepare_source, shift_segments
 
     if progress:
@@ -234,11 +253,14 @@ def default_clipper(source: str, segments: list[Segment], fast: bool, cfg: Confi
                 progress(f"Нарезка {shown.label}")
             result = cut_segment(
                 str(src.path),
-                out_dir / output_filename(slug, shown),
+                out_dir / vertical_name(output_filename(slug, shown), vertical, layout),
                 seg,
                 fast=fast,
                 ffmpeg_path=cfg.ffmpeg_path,
                 has_audio=src.info.has_audio,
+                vertical=vertical,
+                layout=layout,
+                vertical_size=(cfg.vertical_width, cfg.vertical_height),
             )
             result.segment = shown
             results.append(result)
@@ -346,6 +368,7 @@ def make_handler(cfg: Config, clipper: Callable[..., list[ClipResult]] = default
                     end = parse_timecode(data.get("end"))
                     segments = [Segment(start, end)]
                     validate_segments(segments, duration=None)
+                    vertical = bool(data.get("vertical", False))
                 except ValueError as exc:
                     self._error(400, str(exc))
                     return
@@ -355,7 +378,15 @@ def make_handler(cfg: Config, clipper: Callable[..., list[ClipResult]] = default
                 job_id = _new_job()
                 threading.Thread(
                     target=_run_job,
-                    args=(job_id, source, segments, bool(data.get("fast", False)), cfg, clipper),
+                    args=(
+                        job_id,
+                        source,
+                        segments,
+                        bool(data.get("fast", False)),
+                        cfg,
+                        clipper,
+                        vertical,
+                    ),
                     daemon=True,
                 ).start()
                 self._send(202, _dumps({"job_id": job_id}))

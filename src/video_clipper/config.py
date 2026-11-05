@@ -25,6 +25,8 @@ DEFAULTS: dict[str, Any] = {
     "ffprobe_path": "ffprobe",
     "keep_source": False,
     "use_sections": False,
+    "vertical_width": 1080,
+    "vertical_height": 1920,
     "retention_minutes": 30,
     "telegram_token_file": "~/.hermes/video-clipper-bot.token",
     "telegram_chat_ids": [],
@@ -51,6 +53,8 @@ class Config:
     ffprobe_path: str
     keep_source: bool
     use_sections: bool
+    vertical_width: int
+    vertical_height: int
     retention_minutes: int
     telegram_token_file: Path
     telegram_chat_ids: tuple[int, ...]
@@ -87,6 +91,8 @@ def _from_mapping(data: dict[str, Any]) -> Config:
         ffprobe_path=str(merged["ffprobe_path"]),
         keep_source=bool(merged["keep_source"]),
         use_sections=bool(merged["use_sections"]),
+        vertical_width=int(merged["vertical_width"]),
+        vertical_height=int(merged["vertical_height"]),
         retention_minutes=int(merged["retention_minutes"]),
         telegram_token_file=Path(str(merged["telegram_token_file"])).expanduser(),
         telegram_chat_ids=tuple(int(x) for x in (merged["telegram_chat_ids"] or [])),

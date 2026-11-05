@@ -49,8 +49,9 @@ HELP = (
     "  <ссылка> и на следующей строке 1:00-1:15\n\n"
     "Несколько отрезков — несколько пар через пробел или запятую.\n"
     "Слово «fast» отключает перекодирование (быстро, но границы по ключевому кадру).\n"
-    "У готового ролика есть кнопка «⚡ Без перекодирования» — перережет тот же отрезок\n"
-    "за секунды из уже скачанного файла.\n\n"
+    "У готового ролика есть кнопки: «⚡ Без перекодирования» — тот же отрезок за секунды\n"
+    "из уже скачанного файла, и «📱 Вертикально 9:16» — кадр под смартфон (можно с размытым фоном).\n"
+    "Словом тоже можно: «вертикально», «9:16», «шортс», а «размытый фон» — фон вместо обрезки.\n\n"
     "/status — что лежит на машине, /clean — удалить всё сейчас.\n"
     f"Файлы удаляются автоматически через {{minutes}} мин тишины."
 )
@@ -61,6 +62,8 @@ class Request:
     source: str
     segments: list[Segment] = field(default_factory=list)
     fast: bool = False
+    vertical: bool = False
+    layout: str = "crop"
 
 
 class TelegramError(RuntimeError):
@@ -202,13 +205,30 @@ class Telegram:
 JOBS: dict[str, dict] = {}
 
 
-def fast_keyboard(job_key: str) -> dict:
-    """Inline button that re-cuts the same fragment with -c copy."""
-    return {
-        "inline_keyboard": [
-            [{"text": "⚡ Без перекодирования (быстро)", "callback_data": f"recut:{job_key}"}]
-        ]
-    }
+def recut_keyboard(
+    job_key: str,
+    vertical: bool = False,
+    layout: str = "crop",
+    allow_recut: bool = True,
+) -> dict:
+    """Buttons under the clip: other useful variants of the same fragment."""
+    row: list[dict] = []
+    if vertical:
+        # Already vertical: offer the other framing, nothing else.
+        if layout == "blur":
+            row.append({"text": "📱 9:16 без размытия", "callback_data": f"vert:{job_key}"})
+        else:
+            row.append({"text": "📱 9:16 + размытый фон", "callback_data": f"vertblur:{job_key}"})
+    else:
+        if allow_recut:
+            row.append(
+                {"text": "⚡ Без перекодирования (быстро)", "callback_data": f"recut:{job_key}"}
+            )
+        row.append({"text": "📱 Вертикально 9:16", "callback_data": f"vert:{job_key}"})
+        row.append(
+            {"text": "📱 Вертикально + размытый фон", "callback_data": f"vertblur:{job_key}"}
+        )
+    return {"inline_keyboard": [row]}
 
 
 def clip_for_bot(
@@ -216,13 +236,15 @@ def clip_for_bot(
     segments: list[Segment],
     fast: bool,
     cfg: Config,
+    vertical: bool = False,
+    layout: str = "crop",
 ) -> tuple[list, dict]:
     """Cut for the bot and keep the source file so a re-cut is instant.
 
     The CLI removes the download after cutting; the bot must not, otherwise the
     "без перекодирования" button would have to download everything again.
     """
-    from .cut import cut_segment
+    from .cut import cut_segment, vertical_name
     from .segments import output_filename, source_slug, validate_segments
     from .source import prepare_source, shift_segments
 
@@ -238,15 +260,20 @@ def clip_for_bot(
         shown = segments[i] if i < len(segments) else seg
         result = cut_segment(
             str(src.path),
-            out_dir / output_filename(slug, shown),
+            out_dir / vertical_name(output_filename(slug, shown), vertical, layout),
             seg,
             fast=fast,
             ffmpeg_path=cfg.ffmpeg_path,
             has_audio=src.info.has_audio,
+            vertical=vertical,
+            layout=layout,
+            vertical_size=(cfg.vertical_width, cfg.vertical_height),
         )
         result.segment = shown
         results.append(result)
     job = {
+        "vertical": vertical,
+        "layout": layout,
         "path": str(src.path),
         "segments": [{"start": s.start, "end": s.end} for s in shifted],
         "shown": [{"start": s.start, "end": s.end} for s in segments],
@@ -278,9 +305,13 @@ def parse_request(text: str) -> Request | None:
                 segments.append(Segment(_num(times[i]), _num(times[i + 1])))
 
     fast = bool(re.search(r"\b(fast|быстро|быстрый)\b", rest, re.IGNORECASE))
+    vertical = bool(
+        re.search(r"\b(vertical|вертикаль\w*|9\s*[:xх]\s*16|шортс\w*|reels?)\b", rest, re.IGNORECASE)
+    )
+    layout = "blur" if re.search(r"\b(blur|размыт\w*|фон)\b", rest, re.IGNORECASE) else "crop"
     if not segments:
-        return Request(source=source, segments=[], fast=fast)
-    return Request(source=source, segments=segments, fast=fast)
+        return Request(source=source, segments=[], fast=fast, vertical=vertical, layout=layout)
+    return Request(source=source, segments=segments, fast=fast, vertical=vertical, layout=layout)
 
 
 def _num(token: str) -> float:
@@ -361,14 +392,21 @@ def handle_message(bot, cfg: Config, message: dict, clipper=None) -> None:
         if clipper is not None:
             results = clipper(request.source, request.segments, request.fast, cfg, progress=None)
         else:
-            results, job = clip_for_bot(request.source, request.segments, request.fast, cfg)
+            results, job = clip_for_bot(
+                request.source,
+                request.segments,
+                request.fast,
+                cfg,
+                vertical=request.vertical,
+                layout=request.layout,
+            )
     except Exception as exc:  # noqa: BLE001 — the chat is the error channel
         log.exception("Ошибка нарезки")
         bot.send_message(chat_id, f"Ошибка: {exc}")
         return
 
     job_key = ""
-    if job is not None and not request.fast:
+    if job is not None:
         job_key = uuid.uuid4().hex[:8]
         job["created"] = time.time()
         JOBS[job_key] = job
@@ -376,7 +414,16 @@ def handle_message(bot, cfg: Config, message: dict, clipper=None) -> None:
     for index, result in enumerate(results):
         caption = f"{result.segment.label} · {result.mode} · {result.duration:.2f} с"
         is_last = index == len(results) - 1
-        markup = fast_keyboard(job_key) if job_key and is_last else None
+        markup = (
+            recut_keyboard(
+                job_key,
+                vertical=request.vertical,
+                layout=request.layout,
+                allow_recut=not request.fast,
+            )
+            if job_key and is_last
+            else None
+        )
         try:
             bot.send_video(chat_id, Path(result.output_path), caption, reply_markup=markup)
         except TelegramError as exc:
@@ -406,11 +453,16 @@ def handle_callback(bot, cfg: Config, callback: dict) -> None:
 
     if not chat_id or (cfg.telegram_chat_ids and chat_id not in cfg.telegram_chat_ids):
         return
-    if not data.startswith("recut:"):
+
+    kind, _, key = data.partition(":")
+    if kind not in {"recut", "vert", "vertblur"}:
         answer("Не понимаю команду")
         return
+    fast = kind == "recut"
+    vertical = kind in {"vert", "vertblur"}
+    layout = "blur" if kind == "vertblur" else "crop"
 
-    job = JOBS.get(data.split(":", 1)[1]) if ":" in data else None
+    job = JOBS.get(key)
     if not job:
         answer("Это задание уже устарело — пришли ссылку заново")
         return
@@ -419,9 +471,10 @@ def handle_callback(bot, cfg: Config, callback: dict) -> None:
         answer("Исходник уже удалён — пришли ссылку заново")
         return
 
-    answer("Режу без перекодирования...")
+    answer("Режу вертикально..." if vertical else "Режу без перекодирования...")
     bot.send_chat_action(chat_id, "record_video")
 
+    from .cut import vertical_name
     from .segments import Segment, output_filename, source_slug
 
     out_dir = Path(cfg.output_dir).expanduser()
@@ -431,33 +484,44 @@ def handle_callback(bot, cfg: Config, callback: dict) -> None:
         seg = Segment(raw["start"], raw["end"])
         shown_raw = job["shown"][i] if i < len(job["shown"]) else raw
         shown = Segment(shown_raw["start"], shown_raw["end"])
+        base_name = f"{slug}_{shown.start:.0f}_{shown.end:.0f}" + ("" if vertical else "_fast")
         try:
             result = cut_segment(
                 str(source_path),
-                out_dir / output_filename(slug, shown, name=f"{slug}_{shown.start:.0f}_{shown.end:.0f}_fast"),
+                out_dir / vertical_name(
+                    output_filename(slug, shown, name=base_name), vertical, layout
+                ),
                 seg,
-                fast=True,
+                fast=fast,
                 ffmpeg_path=cfg.ffmpeg_path,
                 has_audio=bool(job.get("has_audio", True)),
+                vertical=vertical,
+                layout=layout,
+                vertical_size=(cfg.vertical_width, cfg.vertical_height),
             )
         except Exception as exc:  # noqa: BLE001
             bot.send_message(chat_id, f"Не смог перерезать: {exc}")
             continue
         try:
+            label = "fast (без перекодирования)" if fast else (
+                "9:16 размытый фон" if layout == "blur" else "9:16"
+            )
             bot.send_video(
                 chat_id,
                 Path(result.output_path),
-                f"{shown.label} · fast (без перекодирования) · {result.duration:.2f} с",
+                f"{shown.label} · {label} · {result.duration:.2f} с",
             )
             sent += 1
         except TelegramError as exc:
             bot.send_message(chat_id, f"Не смог отправить видео: {exc}")
     if sent:
-        bot.send_message(
-            chat_id,
+        note = (
             "Готово без перекодирования. Границы могли сместиться к ключевому кадру; "
-            "точный вариант остался в чате выше.",
+            "точный вариант остался в чате выше."
+            if fast
+            else "Готово: вертикальный кадр 1080x1920."
         )
+        bot.send_message(chat_id, note)
 
 
 def read_token(token_file: Path) -> str | None:

@@ -53,6 +53,63 @@ class TestCommand:
         assert cmd.index("-ss") < cmd.index("-i")
 
 
+class TestVertical:
+    def test_crop_filter(self):
+        cmd = build_ffmpeg_command("in.mp4", "out.mp4", Segment(0, 1), vertical=True)
+        joined = " ".join(cmd)
+        assert "force_original_aspect_ratio=increase" in joined
+        assert "crop=1080:1920" in joined
+        assert "libx264" in cmd
+
+    def test_blur_filter_uses_two_inputs(self):
+        cmd = build_ffmpeg_command("in.mp4", "out.mp4", Segment(0, 1), vertical=True, layout="blur")
+        joined = " ".join(cmd)
+        assert "-filter_complex" in cmd
+        assert "gblur=sigma=20" in joined and "overlay=(W-w)/2:(H-h)/2" in joined
+
+    def test_vertical_ignores_fast(self):
+        cmd = build_ffmpeg_command("in.mp4", "out.mp4", Segment(0, 1), fast=True, vertical=True)
+        assert "copy" not in cmd
+
+    def test_custom_size(self):
+        cmd = build_ffmpeg_command("in.mp4", "out.mp4", Segment(0, 1), vertical=True, vertical_size=(720, 1280))
+        assert "crop=720:1280" in " ".join(cmd)
+
+    def test_vertical_name(self):
+        from video_clipper.cut import vertical_name
+
+        assert vertical_name("a__1__2.mp4", False) == "a__1__2.mp4"
+        assert vertical_name("a__1__2.mp4", True) == "a__1__2_vertical.mp4"
+        assert vertical_name("a__1__2.mp4", True, "blur") == "a__1__2_vertical_blur.mp4"
+
+    def test_real_vertical_cut(self, ten_seconds, tmp_path):
+        out = tmp_path / "v.mp4"
+        res = cut_segment(
+            ten_seconds, out, Segment(1, 2), vertical=True, vertical_size=(360, 640)
+        )
+        probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=width,height", "-of", "csv=p=0", str(out)],
+            capture_output=True, text=True,
+        )
+        assert probe.stdout.strip() == "360,640"
+        assert res.mode == "accurate+vertical"
+
+    def test_real_vertical_blur_cut(self, ten_seconds, tmp_path):
+        out = tmp_path / "vb.mp4"
+        res = cut_segment(
+            ten_seconds, out, Segment(1, 2), vertical=True, layout="blur",
+            vertical_size=(360, 640),
+        )
+        probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=width,height", "-of", "csv=p=0", str(out)],
+            capture_output=True, text=True,
+        )
+        assert probe.stdout.strip() == "360,640"
+        assert res.mode == "accurate+vertical-blur"
+
+
 class TestCutSegment:
     def test_accurate_duration(self, ten_seconds, tmp_path):
         out = tmp_path / "accurate.mp4"

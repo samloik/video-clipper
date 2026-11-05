@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import Config
-from .cut import ClipResult, cut_segment, ensure_free_space
+from .cut import ClipResult, cut_segment, ensure_free_space, vertical_name
 from .segments import (
     Segment,
     build_segments,
@@ -30,6 +30,9 @@ def run_pipeline(args: Any, cfg: Config) -> list[ClipResult]:
         name=getattr(args, "name", None),
     )
     fast = bool(getattr(args, "fast", False))
+    vertical = bool(getattr(args, "vertical", False) or getattr(args, "blur", False))
+    layout = "blur" if bool(getattr(args, "blur", False)) else "crop"
+    vertical_size = (cfg.vertical_width, cfg.vertical_height)
     dry_run = bool(getattr(args, "dry_run", False))
     keep_source = bool(getattr(args, "keep_source", False)) or cfg.keep_source
     source_value = str(args.source)
@@ -73,7 +76,7 @@ def run_pipeline(args: Any, cfg: Config) -> list[ClipResult]:
         for i, seg in enumerate(segments):
             shown = original_segments[i] if i < len(original_segments) else seg
             name = args.name if (getattr(args, "name", None) and len(segments) == 1) else None
-            out_path = out_dir / output_filename(slug, shown, name)
+            out_path = out_dir / vertical_name(output_filename(slug, shown, name), vertical, layout)
             result = cut_segment(
                 str(src.path),
                 out_path,
@@ -81,6 +84,9 @@ def run_pipeline(args: Any, cfg: Config) -> list[ClipResult]:
                 fast=fast,
                 ffmpeg_path=cfg.ffmpeg_path,
                 has_audio=src.info.has_audio,
+                vertical=vertical,
+                layout=layout,
+                vertical_size=vertical_size,
             )
             result.segment = shown
             results.append(result)

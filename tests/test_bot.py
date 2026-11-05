@@ -169,7 +169,7 @@ def make_clipper(tmp_path: Path):
 
 
 def fake_clip_for_bot(tmp_path):
-    def _inner(source, segments, fast, cfg):
+    def _inner(source, segments, fast, cfg, vertical=False, layout="crop"):
         out = tmp_path / "out" / "clip.mp4"
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_bytes(b"mp4")
@@ -189,6 +189,8 @@ def fake_clip_for_bot(tmp_path):
             "shown": [{"start": segments[0].start, "end": segments[0].end}],
             "has_audio": True,
             "source": source,
+            "vertical": vertical,
+            "layout": layout,
             "created": time.time(),
         }
         return results, job
@@ -210,15 +212,42 @@ class TestFastButton:
         key = button["callback_data"].split(":")[1]
         assert key in botmod.JOBS
 
-    def test_no_keyboard_when_already_fast(self, tmp_path, monkeypatch):
+    def test_keyboard_without_recut_button_for_fast_request(self, tmp_path, monkeypatch):
         import video_clipper.bot as botmod
 
         monkeypatch.setattr(botmod, "clip_for_bot", fake_clip_for_bot(tmp_path))
         botmod.JOBS.clear()
         bot = FakeBot()
         handle_message(bot, _cfg(tmp_path), {"chat": {"id": 1}, "text": "https://youtu.be/x 0:01-0:04 fast"})
-        assert bot.markups == [None]
-        assert botmod.JOBS == {}
+        labels = [b["text"] for b in bot.markups[0]["inline_keyboard"][0]]
+        assert len(labels) == 2
+        assert all("Вертикально" in label for label in labels)
+        assert not any("Без перекодирования" in label for label in labels)
+
+    def test_vertical_request_hides_vertical_buttons(self, tmp_path, monkeypatch):
+        import video_clipper.bot as botmod
+
+        seen = {}
+
+        def fake(source, segments, fast, cfg, vertical=False, layout="crop"):
+            seen["vertical"] = vertical
+            return fake_clip_for_bot(tmp_path)(source, segments, fast, cfg)[0], {
+                "path": str(tmp_path / "out" / "clip.mp4"),
+                "segments": [{"start": 0.0, "end": 1.0}],
+                "shown": [{"start": 0.0, "end": 1.0}],
+                "has_audio": True,
+                "source": source,
+                "vertical": True,
+                "created": time.time(),
+            }
+
+        monkeypatch.setattr(botmod, "clip_for_bot", fake)
+        botmod.JOBS.clear()
+        bot = FakeBot()
+        handle_message(bot, _cfg(tmp_path), {"chat": {"id": 1}, "text": "https://youtu.be/x 0:01-0:04 вертикально"})
+        assert seen["vertical"] is True
+        labels = [b["text"] for b in bot.markups[0]["inline_keyboard"][0]]
+        assert all("Вертикально" not in label for label in labels)
 
     def _callback(self, text="Режу без перекодирования...", data="recut:known"):
         return {"id": "cb1", "data": data, "message": {"chat": {"id": 1}, "message_id": 5}}
@@ -340,6 +369,18 @@ class TestHandleMessage:
         handle_message(bot, cfg, {"chat": {"id": 1}, "text": "/clean"})
         assert not (cfg.cache_dir / "a.mp4").exists()
         assert "Удалено 1" in bot.messages[0][1]
+
+    def test_parse_vertical_keywords(self):
+        for word in ("вертикально", "vertical", "9:16", "шортс", "reels"):
+            assert parse_request(f"https://youtu.be/x 0:01-0:02 {word}").vertical is True, word
+
+    def test_parse_vertical_blur(self):
+        req = parse_request("https://youtu.be/x 0:01-0:02 вертикально размытый фон")
+        assert req.vertical is True and req.layout == "blur"
+
+    def test_parse_plain_request_is_not_vertical(self):
+        req = parse_request("https://youtu.be/x 0:01-0:02")
+        assert req.vertical is False and req.layout == "crop"
 
     def test_missing_timecodes(self, tmp_path):
         bot = FakeBot()

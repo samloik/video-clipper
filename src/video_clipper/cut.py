@@ -21,6 +21,39 @@ ACCURATE_VIDEO_ARGS = [
 ACCURATE_AUDIO_ARGS = ["-c:a", "aac", "-b:a", "160k"]
 FAST_ARGS = ["-c", "copy"]
 
+VERTICAL_SIZE = (1080, 1920)
+
+# "cover": scale so the frame fills 1080x1920, then crop the overflow — the usual
+# centre crop for Shorts/Reels. "blur": fit the whole frame, back it with a
+# blurred, cropped copy. Both keep the SAR at 1 so phones do not letterbox.
+VERTICAL_CROP_FILTER = (
+    "scale={w}:{h}:force_original_aspect_ratio=increase,"
+    "crop={w}:{h},setsar=1"
+)
+VERTICAL_BLUR_FILTER = (
+    "[0:v]scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},"
+    "gblur=sigma=20[bg];"
+    "[0:v]scale={w}:{h}:force_original_aspect_ratio=decrease[fg];"
+    "[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1"
+)
+
+
+def vertical_name(filename: str, vertical: bool, layout: str = "crop") -> str:
+    """Mark the variant in the file name so both versions can coexist."""
+    if not vertical:
+        return filename
+    suffix = "_vertical_blur" if layout == "blur" else "_vertical"
+    stem = filename[:-4] if filename.lower().endswith(".mp4") else filename
+    return f"{stem}{suffix}.mp4"
+
+
+def vertical_args(layout: str = "crop", size: tuple[int, int] = VERTICAL_SIZE) -> list[str]:
+    """ffmpeg video-filter arguments for a 9:16 frame."""
+    width, height = size
+    if layout == "blur":
+        return ["-filter_complex", VERTICAL_BLUR_FILTER.format(w=width, h=height)]
+    return ["-vf", VERTICAL_CROP_FILTER.format(w=width, h=height)]
+
 
 class CutError(RuntimeError):
     """Raised when ffmpeg fails or the result looks wrong."""
@@ -54,6 +87,9 @@ def build_ffmpeg_command(
     fast: bool = False,
     ffmpeg_path: str = "ffmpeg",
     has_audio: bool = True,
+    vertical: bool = False,
+    layout: str = "crop",
+    vertical_size: tuple[int, int] = VERTICAL_SIZE,
 ) -> list[str]:
     """Build the ffmpeg argv for one segment.
 
@@ -70,10 +106,13 @@ def build_ffmpeg_command(
         "-i", str(src),
         "-t", f"{seg.duration:.3f}",
     ]
-    if fast:
+    if fast and not vertical:
         cmd += FAST_ARGS
     else:
+        # Vertical mode always re-encodes: cropping cannot be stream-copied.
         cmd += ACCURATE_VIDEO_ARGS
+        if vertical:
+            cmd += vertical_args(layout, vertical_size)
         cmd += ACCURATE_AUDIO_ARGS if has_audio else ["-an"]
         # Re-encoded output may start at a negative PTS offset; zero it.
         # With -c copy this option inflates the duration by the seek offset,
@@ -91,12 +130,27 @@ def cut_segment(
     ffmpeg_path: str = "ffmpeg",
     has_audio: bool = True,
     runner=subprocess.run,
+    vertical: bool = False,
+    layout: str = "crop",
+    vertical_size: tuple[int, int] = VERTICAL_SIZE,
 ) -> ClipResult:
     """Run ffmpeg for one segment and return the result."""
     out_path = Path(out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    cmd = build_ffmpeg_command(src, out_path, seg, fast=fast, ffmpeg_path=ffmpeg_path, has_audio=has_audio)
-    mode = "fast" if fast else "accurate"
+    cmd = build_ffmpeg_command(
+        src,
+        out_path,
+        seg,
+        fast=fast,
+        ffmpeg_path=ffmpeg_path,
+        has_audio=has_audio,
+        vertical=vertical,
+        layout=layout,
+        vertical_size=vertical_size,
+    )
+    mode = "fast" if fast and not vertical else "accurate"
+    if vertical:
+        mode += "+vertical" if layout != "blur" else "+vertical-blur"
     log.info("Нарезка %s: %s → %s", mode, seg.label, out_path.name)
     log.debug("ffmpeg: %s", " ".join(cmd))
 

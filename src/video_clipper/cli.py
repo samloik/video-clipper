@@ -24,6 +24,8 @@ def build_parser() -> argparse.ArgumentParser:
             "  video-clipper https://youtu.be/ID --range 1:12-1:45\n"
             "  video-clipper video.mp4 --range 0:10-0:25 --range 2:00-2:30 --name intro\n"
             "  video-clipper https://youtu.be/ID --csv clips.csv --fast\n"
+            "  video-clipper video.mp4 --range 0:10-0:25 --vertical   # 9:16 для смартфона\n"
+            "  video-clipper video.mp4 --range 0:10-0:25 --blur       # 9:16 + размытый фон\n"
             "  video-clipper --gui\n"
         ),
     )
@@ -44,6 +46,16 @@ def build_parser() -> argparse.ArgumentParser:
     mode.add_argument("--fast", dest="fast", action="store_true", help="без перекодирования, точность до ключевого кадра")
     p.set_defaults(fast=False)
     p.add_argument("--allow-overlap", action="store_true", help="разрешить пересекающиеся отрезки")
+    p.add_argument(
+        "--vertical",
+        action="store_true",
+        help="вертикальный кадр 9:16 для смартфона (центр-кроп 1080x1920)",
+    )
+    p.add_argument(
+        "--blur",
+        action="store_true",
+        help="вертикальный кадр с размытым фоном вместо обрезки (включает --vertical)",
+    )
     p.add_argument("--keep-source", action="store_true", help="сохранить скачанный оригинал в cache/")
     p.add_argument("--output-dir", help="каталог для готовых фрагментов")
     p.add_argument("--resolution", type=int, help="максимальное разрешение при скачивании, например 720")
