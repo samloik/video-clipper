@@ -120,15 +120,24 @@ class FakeBot:
         self.messages: list[tuple[int, str]] = []
         self.videos: list[tuple[int, Path, str]] = []
         self.actions: list[str] = []
+        self.markups: list[dict | None] = []
+        self.answered: list[str] = []
 
     def send_message(self, chat_id, text):
         self.messages.append((chat_id, text))
 
-    def send_video(self, chat_id, path, caption=""):
+    def send_video(self, chat_id, path, caption="", reply_markup=None):
         self.videos.append((chat_id, Path(path), caption))
+        self.markups.append(reply_markup)
+        return {"message_id": 100 + len(self.videos)}
 
     def send_chat_action(self, chat_id, action="upload_video"):
         self.actions.append(action)
+
+    def call(self, method, payload=None, timeout=None):
+        if method == "answerCallbackQuery":
+            self.answered.append((payload or {}).get("text", ""))
+        return {}
 
 
 def _cfg(tmp_path: Path, chats: tuple[int, ...] = ()):
@@ -157,6 +166,131 @@ def make_clipper(tmp_path: Path):
         ]
 
     return _clip
+
+
+def fake_clip_for_bot(tmp_path):
+    def _inner(source, segments, fast, cfg):
+        out = tmp_path / "out" / "clip.mp4"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(b"mp4")
+        results = [
+            ClipResult(
+                source=source,
+                segment=segments[0],
+                output_path=out,
+                duration=segments[0].duration,
+                mode="fast" if fast else "accurate",
+                size_bytes=3,
+            )
+        ]
+        job = {
+            "path": str(out),
+            "segments": [{"start": segments[0].start, "end": segments[0].end}],
+            "shown": [{"start": segments[0].start, "end": segments[0].end}],
+            "has_audio": True,
+            "source": source,
+            "created": time.time(),
+        }
+        return results, job
+
+    return _inner
+
+
+class TestFastButton:
+    def test_keyboard_attached_for_accurate_cut(self, tmp_path, monkeypatch):
+        import video_clipper.bot as botmod
+
+        monkeypatch.setattr(botmod, "clip_for_bot", fake_clip_for_bot(tmp_path))
+        botmod.JOBS.clear()
+        bot = FakeBot()
+        handle_message(bot, _cfg(tmp_path), {"chat": {"id": 1}, "text": "https://youtu.be/x 0:01-0:04"})
+        assert bot.markups and bot.markups[0]
+        button = bot.markups[0]["inline_keyboard"][0][0]
+        assert button["callback_data"].startswith("recut:")
+        key = button["callback_data"].split(":")[1]
+        assert key in botmod.JOBS
+
+    def test_no_keyboard_when_already_fast(self, tmp_path, monkeypatch):
+        import video_clipper.bot as botmod
+
+        monkeypatch.setattr(botmod, "clip_for_bot", fake_clip_for_bot(tmp_path))
+        botmod.JOBS.clear()
+        bot = FakeBot()
+        handle_message(bot, _cfg(tmp_path), {"chat": {"id": 1}, "text": "https://youtu.be/x 0:01-0:04 fast"})
+        assert bot.markups == [None]
+        assert botmod.JOBS == {}
+
+    def _callback(self, text="Режу без перекодирования...", data="recut:known"):
+        return {"id": "cb1", "data": data, "message": {"chat": {"id": 1}, "message_id": 5}}
+
+    def test_recut_uses_copy_mode(self, tmp_path, monkeypatch):
+        import video_clipper.bot as botmod
+        from video_clipper.bot import JOBS, handle_callback
+
+        source = tmp_path / "src.mp4"
+        source.write_bytes(b"src")
+        # a real 1-second clip is needed because cut_segment probes its output
+        import subprocess
+
+        subprocess.run(
+            ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+             "-f", "lavfi", "-i", "testsrc=size=160x120:rate=25:duration=3",
+             "-f", "lavfi", "-i", "sine=frequency=440:duration=3",
+             "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+             "-c:a", "aac", "-shortest", str(source)],
+            check=True,
+        )
+        JOBS.clear()
+        JOBS["known"] = {
+            "path": str(source),
+            "segments": [{"start": 0.0, "end": 1.0}],
+            "shown": [{"start": 10.0, "end": 11.0}],
+            "has_audio": True,
+            "source": "https://youtu.be/x",
+            "created": time.time(),
+        }
+        bot = FakeBot()
+        handle_callback(bot, _cfg(tmp_path), self._callback())
+        assert len(bot.videos) == 1
+        assert "fast" in bot.videos[0][2]
+        assert bot.videos[0][1].name.endswith("_fast.mp4")
+        assert any("Готово" in text for _, text in bot.messages)
+
+    def test_recut_without_job(self, tmp_path):
+        from video_clipper.bot import JOBS, handle_callback
+
+        JOBS.clear()
+        bot = FakeBot()
+        handle_callback(bot, _cfg(tmp_path), self._callback())
+        assert bot.videos == []
+        assert any("устарело" in text for text in bot.answered)
+
+    def test_recut_when_source_deleted(self, tmp_path):
+        from video_clipper.bot import JOBS, handle_callback
+
+        JOBS.clear()
+        JOBS["known"] = {
+            "path": str(tmp_path / "gone.mp4"),
+            "segments": [{"start": 0.0, "end": 1.0}],
+            "shown": [{"start": 0.0, "end": 1.0}],
+            "has_audio": True,
+            "source": "https://youtu.be/x",
+            "created": time.time(),
+        }
+        bot = FakeBot()
+        handle_callback(bot, _cfg(tmp_path), self._callback())
+        assert bot.videos == []
+        assert any("удал" in text for text in bot.answered)
+
+    def test_foreign_chat_callback_ignored(self, tmp_path):
+        from video_clipper.bot import JOBS, handle_callback
+
+        JOBS.clear()
+        JOBS["known"] = {"path": "/tmp/x.mp4", "segments": [], "shown": [], "source": "u"}
+        bot = FakeBot()
+        cfg = _cfg(tmp_path, chats=(42,))
+        handle_callback(bot, cfg, {"id": "c", "data": "recut:known", "message": {"chat": {"id": 7}}})
+        assert bot.videos == [] and bot.answered == []
 
 
 class TestHandleMessage:

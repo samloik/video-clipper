@@ -48,7 +48,9 @@ HELP = (
     "  https://youtu.be/ID 0:05 0:12\n"
     "  <ссылка> и на следующей строке 1:00-1:15\n\n"
     "Несколько отрезков — несколько пар через пробел или запятую.\n"
-    "Слово «fast» отключает перекодирование (быстро, но границы по ключевому кадру).\n\n"
+    "Слово «fast» отключает перекодирование (быстро, но границы по ключевому кадру).\n"
+    "У готового ролика есть кнопка «⚡ Без перекодирования» — перережет тот же отрезок\n"
+    "за секунды из уже скачанного файла.\n\n"
     "/status — что лежит на машине, /clean — удалить всё сейчас.\n"
     f"Файлы удаляются автоматически через {{minutes}} мин тишины."
 )
@@ -142,7 +144,7 @@ class Telegram:
         return body.get("result", {})
 
     def get_updates(self, offset: int | None, long_poll: int = 50) -> list[dict]:
-        payload: dict = {"timeout": long_poll, "allowed_updates": ["message"]}
+        payload: dict = {"timeout": long_poll, "allowed_updates": ["message", "callback_query"]}
         if offset is not None:
             payload["offset"] = offset
         return self.call("getUpdates", payload, timeout=long_poll + 20)
@@ -156,11 +158,19 @@ class Telegram:
         except TelegramError:  # cosmetic
             pass
 
-    def send_video(self, chat_id: int, path: Path | str, caption: str = "") -> dict:
+    def send_video(
+        self,
+        chat_id: int,
+        path: Path | str,
+        caption: str = "",
+        reply_markup: dict | None = None,
+    ) -> dict:
         path = Path(path)
         boundary = uuid.uuid4().hex
         mime = mimetypes.guess_type(path.name)[0] or "video/mp4"
         fields = {"chat_id": str(chat_id), "caption": caption[:1024], "supports_streaming": "true"}
+        if reply_markup:
+            fields["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
         chunks: list[bytes] = []
         for key, value in fields.items():
             chunks.append(
@@ -186,6 +196,64 @@ class Telegram:
         if not payload.get("ok"):
             raise TelegramError(f"sendVideo: {payload.get('description')}")
         return payload.get("result", {})
+
+
+# job key -> what is needed to re-cut without touching the network again
+JOBS: dict[str, dict] = {}
+
+
+def fast_keyboard(job_key: str) -> dict:
+    """Inline button that re-cuts the same fragment with -c copy."""
+    return {
+        "inline_keyboard": [
+            [{"text": "⚡ Без перекодирования (быстро)", "callback_data": f"recut:{job_key}"}]
+        ]
+    }
+
+
+def clip_for_bot(
+    source: str,
+    segments: list[Segment],
+    fast: bool,
+    cfg: Config,
+) -> tuple[list, dict]:
+    """Cut for the bot and keep the source file so a re-cut is instant.
+
+    The CLI removes the download after cutting; the bot must not, otherwise the
+    "без перекодирования" button would have to download everything again.
+    """
+    from .cut import cut_segment
+    from .segments import output_filename, source_slug, validate_segments
+    from .source import prepare_source, shift_segments
+
+    src = prepare_source(source, cfg, segments=[(s.start, s.end) for s in segments], keep_source=True)
+    shifted = shift_segments(segments, src.offset)
+    validate_segments(shifted, duration=src.info.duration or None)
+
+    out_dir = Path(cfg.output_dir).expanduser()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    slug = source_slug(source)
+    results = []
+    for i, seg in enumerate(shifted):
+        shown = segments[i] if i < len(segments) else seg
+        result = cut_segment(
+            str(src.path),
+            out_dir / output_filename(slug, shown),
+            seg,
+            fast=fast,
+            ffmpeg_path=cfg.ffmpeg_path,
+            has_audio=src.info.has_audio,
+        )
+        result.segment = shown
+        results.append(result)
+    job = {
+        "path": str(src.path),
+        "segments": [{"start": s.start, "end": s.end} for s in shifted],
+        "shown": [{"start": s.start, "end": s.end} for s in segments],
+        "has_audio": src.info.has_audio,
+        "source": source,
+    }
+    return results, job
 
 
 def parse_request(text: str) -> Request | None:
@@ -264,6 +332,7 @@ def handle_message(bot, cfg: Config, message: dict, clipper=None) -> None:
         bot.send_message(chat_id, "\n".join(lines))
         return
     if command == "/clean":
+        JOBS.clear()
         result = sweep([cfg.cache_dir, Path(cfg.output_dir)], minutes=0)
         bot.send_message(
             chat_id, f"Удалено {result.count} файл(ов), {result.freed_bytes / 1048576:.1f} МБ"
@@ -287,26 +356,29 @@ def handle_message(bot, cfg: Config, message: dict, clipper=None) -> None:
     )
     bot.send_chat_action(chat_id, "record_video")
 
-    from .gui import default_clipper
-
-    run = clipper or default_clipper
+    job: dict | None = None
     try:
-        results = run(
-            request.source,
-            request.segments,
-            request.fast,
-            cfg,
-            progress=None,
-        )
+        if clipper is not None:
+            results = clipper(request.source, request.segments, request.fast, cfg, progress=None)
+        else:
+            results, job = clip_for_bot(request.source, request.segments, request.fast, cfg)
     except Exception as exc:  # noqa: BLE001 — the chat is the error channel
         log.exception("Ошибка нарезки")
         bot.send_message(chat_id, f"Ошибка: {exc}")
         return
 
-    for result in results:
+    job_key = ""
+    if job is not None and not request.fast:
+        job_key = uuid.uuid4().hex[:8]
+        job["created"] = time.time()
+        JOBS[job_key] = job
+
+    for index, result in enumerate(results):
         caption = f"{result.segment.label} · {result.mode} · {result.duration:.2f} с"
+        is_last = index == len(results) - 1
+        markup = fast_keyboard(job_key) if job_key and is_last else None
         try:
-            bot.send_video(chat_id, Path(result.output_path), caption)
+            bot.send_video(chat_id, Path(result.output_path), caption, reply_markup=markup)
         except TelegramError as exc:
             bot.send_message(chat_id, f"Не смог отправить видео: {exc}")
 
@@ -315,6 +387,77 @@ def handle_message(bot, cfg: Config, message: dict, clipper=None) -> None:
         f"Готово: {len(results)}. Файлы удалю через {cfg.retention_minutes} мин тишины "
         f"(или сразу — /clean).",
     )
+
+
+def handle_callback(bot, cfg: Config, callback: dict) -> None:
+    """Re-cut the same fragment with -c copy (the ⚡ button)."""
+    from .cut import cut_segment
+
+    data = str(callback.get("data") or "")
+    message = callback.get("message") or {}
+    chat_id = int((message.get("chat") or {}).get("id") or 0)
+    callback_id = callback.get("id")
+
+    def answer(text: str) -> None:
+        try:
+            bot.call("answerCallbackQuery", {"callback_query_id": callback_id, "text": text[:200]})
+        except TelegramError:
+            pass
+
+    if not chat_id or (cfg.telegram_chat_ids and chat_id not in cfg.telegram_chat_ids):
+        return
+    if not data.startswith("recut:"):
+        answer("Не понимаю команду")
+        return
+
+    job = JOBS.get(data.split(":", 1)[1]) if ":" in data else None
+    if not job:
+        answer("Это задание уже устарело — пришли ссылку заново")
+        return
+    source_path = Path(job["path"])
+    if not source_path.is_file():
+        answer("Исходник уже удалён — пришли ссылку заново")
+        return
+
+    answer("Режу без перекодирования...")
+    bot.send_chat_action(chat_id, "record_video")
+
+    from .segments import Segment, output_filename, source_slug
+
+    out_dir = Path(cfg.output_dir).expanduser()
+    slug = source_slug(job["source"])
+    sent = 0
+    for i, raw in enumerate(job["segments"]):
+        seg = Segment(raw["start"], raw["end"])
+        shown_raw = job["shown"][i] if i < len(job["shown"]) else raw
+        shown = Segment(shown_raw["start"], shown_raw["end"])
+        try:
+            result = cut_segment(
+                str(source_path),
+                out_dir / output_filename(slug, shown, name=f"{slug}_{shown.start:.0f}_{shown.end:.0f}_fast"),
+                seg,
+                fast=True,
+                ffmpeg_path=cfg.ffmpeg_path,
+                has_audio=bool(job.get("has_audio", True)),
+            )
+        except Exception as exc:  # noqa: BLE001
+            bot.send_message(chat_id, f"Не смог перерезать: {exc}")
+            continue
+        try:
+            bot.send_video(
+                chat_id,
+                Path(result.output_path),
+                f"{shown.label} · fast (без перекодирования) · {result.duration:.2f} с",
+            )
+            sent += 1
+        except TelegramError as exc:
+            bot.send_message(chat_id, f"Не смог отправить видео: {exc}")
+    if sent:
+        bot.send_message(
+            chat_id,
+            "Готово без перекодирования. Границы могли сместиться к ключевому кадру; "
+            "точный вариант остался в чате выше.",
+        )
 
 
 def read_token(token_file: Path) -> str | None:
@@ -357,13 +500,18 @@ def run_bot(config_path: str | None = None, token_file: Path | None = None) -> i
             continue
         for update in updates:
             offset = int(update["update_id"]) + 1
-            message = update.get("message") or {}
             try:
-                handle_message(bot, cfg, message)
-            except Exception:  # noqa: BLE001 — one bad message must not kill the loop
-                log.exception("Сбой обработки сообщения")
+                if update.get("callback_query"):
+                    handle_callback(bot, cfg, update["callback_query"])
+                else:
+                    handle_message(bot, cfg, update.get("message") or {})
+            except Exception:  # noqa: BLE001 — one bad update must not kill the loop
+                log.exception("Сбой обработки обновления")
         if time.time() - last_sweep > 60:
             sweep([cfg.cache_dir, Path(cfg.output_dir)], cfg.retention_minutes)
+            cutoff = time.time() - cfg.retention_minutes * 60
+            for key in [k for k, v in JOBS.items() if v.get("created", 0) < cutoff]:
+                JOBS.pop(key, None)
             last_sweep = time.time()
 
 
