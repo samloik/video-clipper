@@ -7,7 +7,14 @@ from pathlib import Path
 from typing import Any
 
 from .config import Config
-from .cut import ClipResult, cut_segment, ensure_free_space, pick_vertical_size, vertical_name
+from .cut import (
+    ClipResult,
+    copy_whole,
+    cut_segment,
+    ensure_free_space,
+    pick_vertical_size,
+    vertical_name,
+)
 from .segments import (
     Segment,
     build_segments,
@@ -28,7 +35,9 @@ def run_pipeline(args: Any, cfg: Config) -> list[ClipResult]:
         csv_path=getattr(args, "csv", None),
         json_path=getattr(args, "json_segments", None),
         name=getattr(args, "name", None),
+        allow_empty=True,
     )
+    whole = not segments
     fast = bool(getattr(args, "fast", False))
     vertical = bool(getattr(args, "vertical", False) or getattr(args, "blur", False))
     layout = "blur" if bool(getattr(args, "blur", False)) else "crop"
@@ -42,6 +51,9 @@ def run_pipeline(args: Any, cfg: Config) -> list[ClipResult]:
 
     # Dry run on a URL must not download anything: validate only what is local.
     if dry_run and is_url(source_value):
+        if whole:
+            log.info("dry-run: будет скачан весь ролик целиком → %s", out_dir)
+            return []
         validate_segments(segments, duration=None, allow_overlap=args.allow_overlap)
         results = [_planned(slug, seg, out_dir, fast, i, len(segments)) for i, seg in enumerate(segments)]
         for res in results:
@@ -55,6 +67,16 @@ def run_pipeline(args: Any, cfg: Config) -> list[ClipResult]:
         keep_source=keep_source,
     )
     try:
+        if whole:
+            # No ranges given: the request is the entire video.
+            if src.info.duration <= 0:
+                raise ValueError("не удалось определить длительность ролика")
+            segments = [Segment(0.0, round(src.info.duration, 3))]
+            log.info("Ролик целиком: %.1f с", src.info.duration)
+            if not vertical and not fast:
+                out_path = out_dir / vertical_name(f"{slug}__full.mp4", False)
+                result = copy_whole(str(src.path), out_path, ffmpeg_path=cfg.ffmpeg_path)
+                return [result]
         # A section download starts at 0, so absolute times are mapped onto it;
         # file names and reports keep the times the user asked for.
         original_segments = segments

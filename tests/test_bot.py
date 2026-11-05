@@ -176,6 +176,8 @@ def _cfg(tmp_path: Path, chats: tuple[int, ...] = ()):
 
 def make_clipper(tmp_path: Path):
     def _clip(source, segments, fast, cfg, progress=None):
+        if not segments:  # whole-video request
+            segments = [Segment(0.0, 1.0)]
         out = tmp_path / "out" / f"clip_{int(segments[0].start)}.mp4"
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_bytes(b"mp4")
@@ -347,6 +349,47 @@ class TestFastButton:
         assert bot.videos == [] and bot.answered == []
 
 
+class TestWholeVideo:
+    def test_link_without_timecodes_is_whole_video(self, tmp_path):
+        bot = FakeBot()
+        handle_message(bot, _cfg(tmp_path), {"chat": {"id": 1}, "text": "https://youtu.be/x"}, clipper=make_clipper(tmp_path))
+        assert len(bot.videos) == 1
+        assert any("целиком" in text for _, text in bot.messages)
+
+    def test_whole_video_job_and_buttons(self, tmp_path, monkeypatch):
+        import video_clipper.bot as botmod
+
+        seen = {}
+
+        def fake(source, segments, fast, cfg, vertical=False, layout="crop"):
+            seen["segments"] = list(segments)
+            out = tmp_path / "out" / "whole.mp4"
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_bytes(b"mp4")
+            job = {
+                "path": str(out),
+                "segments": [{"start": 0.0, "end": 60.0}],
+                "shown": [{"start": 0.0, "end": 60.0}],
+                "has_audio": True,
+                "source": source,
+                "vertical": False,
+                "layout": "crop",
+                "whole": True,
+                "created": time.time(),
+            }
+            return [ClipResult(source=source, segment=Segment(0, 60), output_path=out,
+                              duration=60.0, mode="whole (копия)", size_bytes=3)], job
+
+        monkeypatch.setattr(botmod, "clip_for_bot", fake)
+        botmod.JOBS.clear()
+        bot = FakeBot()
+        handle_message(bot, _cfg(tmp_path), {"chat": {"id": 1}, "text": "https://youtu.be/x"})
+        assert seen["segments"] == []
+        assert bot.markups[0] is not None
+        assert len(bot.videos) == 1
+        assert botmod.JOBS, "задание должно быть сохранено для кнопок"
+
+
 class TestHandleMessage:
     def test_sends_video(self, tmp_path):
         bot = FakeBot()
@@ -407,11 +450,11 @@ class TestHandleMessage:
         req = parse_request("https://youtu.be/x 0:01-0:02")
         assert req.vertical is False and req.layout == "crop"
 
-    def test_missing_timecodes(self, tmp_path):
+    def test_link_without_timecodes_delivers_whole_video(self, tmp_path):
         bot = FakeBot()
         handle_message(bot, _cfg(tmp_path), {"chat": {"id": 1}, "text": "https://youtu.be/x"}, clipper=make_clipper(tmp_path))
-        assert bot.videos == []
-        assert "таймкод" in bot.messages[0][1].lower()
+        assert len(bot.videos) == 1
+        assert "целиком" in bot.messages[0][1].lower()
 
     def test_no_url(self, tmp_path):
         bot = FakeBot()

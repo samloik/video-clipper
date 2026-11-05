@@ -140,14 +140,19 @@ def build_segments(
     csv_path: str | None = None,
     json_path: str | None = None,
     name: str | None = None,
+    allow_empty: bool = False,
 ) -> list[Segment]:
-    """Collect segments from every source; ``name`` is only valid for a single one."""
+    """Collect segments from every source; ``name`` is only valid for a single one.
+
+    ``allow_empty`` lets the caller ask for the whole video: no segments at all
+    means "take everything" instead of an error.
+    """
     segments: list[Segment] = [parse_range_spec(r) for r in (ranges or [])]
     if csv_path:
         segments.extend(load_csv(csv_path))
     if json_path:
         segments.extend(load_json(json_path))
-    if not segments:
+    if not segments and not allow_empty:
         raise ValueError("Не задан ни один отрезок: используй --range, --csv или --json")
     if name and len(segments) > 1:
         raise ValueError("--name допустим только для одного отрезка")

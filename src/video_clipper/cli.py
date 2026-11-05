@@ -24,6 +24,7 @@ def build_parser() -> argparse.ArgumentParser:
             "  video-clipper https://youtu.be/ID --range 1:12-1:45\n"
             "  video-clipper video.mp4 --range 0:10-0:25 --range 2:00-2:30 --name intro\n"
             "  video-clipper https://youtu.be/ID --csv clips.csv --fast\n"
+            "  video-clipper \"https://youtu.be/ID\"                    # весь ролик целиком\n"
             "  video-clipper video.mp4 --range 0:10-0:25 --vertical   # 9:16 для смартфона\n"
             "  video-clipper video.mp4 --range 0:10-0:25 --blur       # 9:16 + размытый фон\n"
             "  video-clipper --gui\n"
@@ -114,8 +115,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if not args.source:
         parser.error("укажи URL или файл (либо используй --gui)")
-    if not (args.ranges or args.csv or args.json_segments):
-        parser.error("нужен хотя бы один отрезок: --range, --csv или --json")
+    # No --range/--csv/--json means: take the whole video as one file.
 
     from .pipeline import run_pipeline
 

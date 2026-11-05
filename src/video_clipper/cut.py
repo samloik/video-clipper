@@ -146,6 +146,79 @@ def build_ffmpeg_command(
     return cmd
 
 
+TELEGRAM_LIMIT_BYTES = 45 * 1024 * 1024
+
+
+def copy_whole(src: str | Path, out: str | Path, ffmpeg_path: str = "ffmpeg",
+               runner=subprocess.run, timeout: float | None = None) -> ClipResult:
+    """Take the whole file as-is: remux, no re-encode, no quality loss."""
+    src_path, out_path = Path(src), Path(out)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        ffmpeg_path, "-hide_banner", "-nostdin", "-loglevel", "error", "-y",
+        "-i", str(src_path), "-c", "copy", "-movflags", "+faststart", str(out_path),
+    ]
+    try:
+        proc = runner(cmd, capture_output=True, text=True, check=False, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        raise CutError(f"ffmpeg не успел скопировать {src_path.name}") from exc
+    if proc.returncode != 0:
+        tail = (proc.stderr or "").strip().splitlines()[-5:]
+        raise CutError(f"ffmpeg завершился с кодом {proc.returncode}: " + " | ".join(tail))
+    if not out_path.is_file() or out_path.stat().st_size == 0:
+        raise CutError(f"ffmpeg не создал файл {out_path}")
+    from .probe import probe_media
+
+    info = probe_media(str(out_path))
+    seg = Segment(0.0, round(info.duration, 3))
+    return ClipResult(
+        source=str(src_path), segment=seg, output_path=out_path,
+        duration=seg.duration, mode="whole (копия)", size_bytes=out_path.stat().st_size,
+    )
+
+
+def shrink_to_fit(
+    src: str | Path,
+    out: str | Path,
+    limit_bytes: int = TELEGRAM_LIMIT_BYTES,
+    ffmpeg_path: str = "ffmpeg",
+    has_audio: bool = True,
+    runner=subprocess.run,
+    timeout: float | None = None,
+) -> Path:
+    """Re-encode a file so it fits under ``limit_bytes`` (Telegram caps at 50 MB).
+
+    Two passes are enough in practice: 720p at CRF 28, then 480p at CRF 30.
+    """
+    attempts = [(720, 28), (480, 30)]
+    last: Path | None = None
+    for height, crf in attempts:
+        cmd = [
+            ffmpeg_path, "-hide_banner", "-nostdin", "-loglevel", "error", "-y",
+            "-i", str(src),
+            "-vf", f"scale=-2:{height}",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", str(crf),
+            "-pix_fmt", "yuv420p",
+        ]
+        cmd += ["-c:a", "aac", "-b:a", "96k"] if has_audio else ["-an"]
+        cmd += ["-movflags", "+faststart", str(out)]
+        proc = runner(cmd, capture_output=True, text=True, check=False, timeout=timeout)
+        if proc.returncode != 0 or not Path(out).is_file():
+            raise CutError(
+                "не удалось сжать под лимит Telegram: "
+                + " | ".join((proc.stderr or "").strip().splitlines()[-3:])
+            )
+        last = Path(out)
+        if last.stat().st_size <= limit_bytes:
+            return last
+    if last is None or last.stat().st_size > limit_bytes:
+        raise CutError(
+            f"даже после сжатия файл больше лимита Telegram ({limit_bytes // 1048576} МБ) — "
+            f"пришли отрезок покороче"
+        )
+    return last
+
+
 def cut_segment(
     src: str | Path,
     out: str | Path,

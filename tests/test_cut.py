@@ -121,6 +121,62 @@ class TestVertical:
         assert res.mode == "accurate+vertical-blur"
 
 
+class TestWholeAndShrink:
+    def test_copy_whole_keeps_duration(self, ten_seconds, tmp_path):
+        from video_clipper.cut import copy_whole
+
+        out = tmp_path / "full.mp4"
+        res = copy_whole(ten_seconds, out)
+        assert out.is_file()
+        assert res.duration == pytest.approx(10.0, abs=0.2)
+        assert res.mode.startswith("whole")
+
+    def test_shrink_stops_when_fits(self, tmp_path):
+        from video_clipper.cut import shrink_to_fit
+
+        src = tmp_path / "in.mp4"
+        src.write_bytes(b"x" * 1000)
+        calls = []
+
+        def runner(cmd, **kw):
+            calls.append(cmd)
+            out = Path(cmd[-1])
+            out.write_bytes(b"x" * 10)
+
+            class R:
+                returncode = 0
+                stderr = ""
+
+            return R()
+
+        result = shrink_to_fit(src, tmp_path / "out.mp4", limit_bytes=100, runner=runner)
+        assert result.stat().st_size == 10
+        assert len(calls) == 1
+
+    def test_shrink_retries_second_pass(self, tmp_path):
+        from video_clipper.cut import shrink_to_fit
+
+        src = tmp_path / "in.mp4"
+        src.write_bytes(b"x" * 1000)
+        sizes = [500, 50]
+        calls = []
+
+        def runner(cmd, **kw):
+            calls.append(cmd)
+            Path(cmd[-1]).write_bytes(b"x" * sizes[len(calls) - 1])
+
+            class R:
+                returncode = 0
+                stderr = ""
+
+            return R()
+
+        result = shrink_to_fit(src, tmp_path / "out.mp4", limit_bytes=100, runner=runner)
+        assert len(calls) == 2
+        assert "480" in " ".join(calls[1])
+        assert result.stat().st_size == 50
+
+
 class TestCutSegment:
     def test_accurate_duration(self, ten_seconds, tmp_path):
         out = tmp_path / "accurate.mp4"

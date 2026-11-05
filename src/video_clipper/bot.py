@@ -52,7 +52,8 @@ HELP = (
     "Слово «fast» отключает перекодирование (быстро, но границы по ключевому кадру).\n"
     "У готового ролика есть кнопки: «⚡ Без перекодирования» — тот же отрезок за секунды\n"
     "из уже скачанного файла, и «📱 Вертикально 9:16» — кадр под смартфон (можно с размытым фоном).\n"
-    "Словом тоже можно: «вертикально», «9:16», «шортс», а «размытый фон» — фон вместо обрезки.\n\n"
+    "Словом тоже можно: «вертикально», «9:16», «шортс», а «размытый фон» — фон вместо обрезки.\n"
+    "Пришли только ссылку без таймкодов — отдам ролик целиком (большие файлы сожму до 45 МБ).\n\n"
     "/status — что лежит на машине, /clean — удалить всё сейчас.\n"
     f"Файлы удаляются автоматически через {{minutes}} мин тишины."
 )
@@ -211,6 +212,30 @@ WORK_SLOT = threading.Semaphore(1)
 FFMPEG_TIMEOUT = 1800
 
 
+def send_video_smart(bot, chat_id: int, path: Path, caption: str, has_audio: bool = True,
+                     reply_markup: dict | None = None) -> None:
+    """Send a video, shrinking it first when Telegram would refuse it."""
+    from .cut import TELEGRAM_LIMIT_BYTES, shrink_to_fit
+
+    path = Path(path)
+    if path.stat().st_size > TELEGRAM_LIMIT_BYTES:
+        bot.send_message(
+            chat_id,
+            f"Файл {path.stat().st_size / 1048576:.0f} МБ — больше лимита Telegram, "
+            f"сжимаю до 45 МБ...",
+        )
+        shrunk = path.with_name(path.stem + "_small.mp4")
+        path = shrink_to_fit(
+            path,
+            shrunk,
+            limit_bytes=TELEGRAM_LIMIT_BYTES,
+            has_audio=has_audio,
+            timeout=FFMPEG_TIMEOUT,
+        )
+        caption += " · сжато под лимит"
+    bot.send_video(chat_id, path, caption, reply_markup=reply_markup)
+
+
 def run_in_worker(fn, *args) -> None:
     """Start ``fn`` in a thread, serialised by WORK_SLOT."""
 
@@ -268,12 +293,41 @@ def clip_for_bot(
     from .source import prepare_source, shift_segments
 
     src = prepare_source(source, cfg, segments=[(s.start, s.end) for s in segments], keep_source=True)
+    whole = not segments
+    if whole:
+        if src.info.duration <= 0:
+            raise ValueError("не удалось определить длительность ролика")
+        segments = [Segment(0.0, round(src.info.duration, 3))]
     shifted = shift_segments(segments, src.offset)
     validate_segments(shifted, duration=src.info.duration or None)
 
     out_dir = Path(cfg.output_dir).expanduser()
     out_dir.mkdir(parents=True, exist_ok=True)
     slug = source_slug(source)
+
+    if whole and not vertical:
+        # Whole video, no re-encoding needed: remux, seconds even for long files.
+        from .cut import copy_whole
+
+        result = copy_whole(
+            str(src.path),
+            out_dir / f"{slug}__full.mp4",
+            ffmpeg_path=cfg.ffmpeg_path,
+            timeout=FFMPEG_TIMEOUT,
+        )
+        result.segment = segments[0]
+        return [result], {
+            "height": src.info.height,
+            "vertical": False,
+            "layout": "crop",
+            "path": str(src.path),
+            "segments": [{"start": 0.0, "end": segments[0].end}],
+            "shown": [{"start": 0.0, "end": segments[0].end}],
+            "has_audio": src.info.has_audio,
+            "source": source,
+            "whole": True,
+        }
+
     results = []
     for i, seg in enumerate(shifted):
         shown = segments[i] if i < len(segments) else seg
@@ -294,6 +348,7 @@ def clip_for_bot(
         result.segment = shown
         results.append(result)
     job = {
+        "whole": whole,
         "height": src.info.height,
         "vertical": vertical,
         "layout": layout,
@@ -398,16 +453,15 @@ def handle_message(bot, cfg: Config, message: dict, clipper=None) -> None:
         bot.send_message(chat_id, "Не вижу ссылки. Пришли ссылку и таймкоды, например:\nhttps://youtu.be/ID 0:10-0:20")
         return
     if not request.segments:
+        bot.send_message(chat_id, "Таймкодов нет — пришлю ролик целиком.")
+
+    if request.segments:
         bot.send_message(
             chat_id,
-            "Ссылку вижу, таймкодов нет. Напиши начало и конец, например `0:10-0:20`.",
+            f"Принял: {len(request.segments)} отрезок(ов), режим {'fast' if request.fast else 'точный'}. Режу...",
         )
-        return
-
-    bot.send_message(
-        chat_id,
-        f"Принял: {len(request.segments)} отрезок(ов), режим {'fast' if request.fast else 'точный'}. Режу...",
-    )
+    else:
+        bot.send_message(chat_id, "Качаю ролик целиком, это может занять пару минут...")
     bot.send_chat_action(chat_id, "record_video")
 
     job: dict | None = None
@@ -442,13 +496,20 @@ def handle_message(bot, cfg: Config, message: dict, clipper=None) -> None:
                 job_key,
                 vertical=request.vertical,
                 layout=request.layout,
-                allow_recut=not request.fast,
+                allow_recut=not request.fast and not (job or {}).get("whole"),
             )
             if job_key and is_last
             else None
         )
         try:
-            bot.send_video(chat_id, Path(result.output_path), caption, reply_markup=markup)
+            send_video_smart(
+                bot,
+                chat_id,
+                Path(result.output_path),
+                caption,
+                has_audio=bool(job.get("has_audio", True)) if job else True,
+                reply_markup=markup,
+            )
         except TelegramError as exc:
             bot.send_message(chat_id, f"Не смог отправить видео: {exc}")
 
@@ -542,10 +603,12 @@ def handle_callback(bot, cfg: Config, callback: dict) -> None:
             label = "fast (без перекодирования)" if fast else (
                 "9:16 размытый фон" if layout == "blur" else "9:16"
             )
-            bot.send_video(
+            send_video_smart(
+                bot,
                 chat_id,
                 Path(result.output_path),
                 f"{shown.label} · {label} · {result.duration:.2f} с",
+                has_audio=bool(job.get("has_audio", True)),
             )
             sent += 1
         except TelegramError as exc:
