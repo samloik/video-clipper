@@ -105,7 +105,8 @@ class Telegram:
         except TelegramError:  # cosmetic
             pass
 
-    def send_video(self, chat_id: int, path: Path, caption: str = "") -> dict:
+    def send_video(self, chat_id: int, path: Path | str, caption: str = "") -> dict:
+        path = Path(path)
         boundary = uuid.uuid4().hex
         mime = mimetypes.guess_type(path.name)[0] or "video/mp4"
         fields = {"chat_id": str(chat_id), "caption": caption[:1024], "supports_streaming": "true"}
