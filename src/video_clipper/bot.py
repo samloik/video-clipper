@@ -19,6 +19,7 @@ re-download it, and everything is swept once the conversation goes quiet.
 
 from __future__ import annotations
 
+import http.client
 import json
 import logging
 import mimetypes
@@ -64,12 +65,62 @@ class TelegramError(RuntimeError):
     pass
 
 
+class _SocksHTTPSConnection(http.client.HTTPSConnection):
+    """HTTPS connection that dials through a SOCKS proxy.
+
+    The proxy is applied per connection instead of replacing ``socket.socket``
+    globally: a global patch silently breaks yt-dlp's own networking (it showed
+    up as "Unable to download API page: 2 bytes missing").
+    """
+
+    def __init__(self, *args, proxy: tuple[str, int] | None = None, **kwargs):
+        self._proxy = proxy
+        super().__init__(*args, **kwargs)
+
+    def connect(self) -> None:  # noqa: D102
+        import socks
+
+        if self._proxy is None:
+            return super().connect()
+        sock = socks.socksocket()
+        sock.set_proxy(socks.SOCKS5, self._proxy[0], self._proxy[1], rdns=True)
+        sock.settimeout(self.timeout)
+        sock.connect((self.host, self.port))
+        self.sock = self._context.wrap_socket(sock, server_hostname=self.host)
+
+
+class _SocksHTTPSHandler(urllib.request.HTTPSHandler):
+    def __init__(self, proxy: tuple[str, int]):
+        super().__init__()
+        self._proxy = proxy
+
+    def https_open(self, req):  # noqa: D102
+        return self.do_open(
+            lambda *a, **kw: _SocksHTTPSConnection(*a, proxy=self._proxy, **kw), req
+        )
+
+
+def build_opener(proxy_url: str | None) -> urllib.request.OpenerDirector:
+    """Opener that talks to the Bot API directly or through SOCKS5."""
+    if not proxy_url:
+        return urllib.request.build_opener()
+    from urllib.parse import urlparse
+
+    parsed = urlparse(proxy_url)
+    if parsed.scheme not in {"socks5", "socks5h"} or not parsed.hostname:
+        log.warning("Прокси %s не SOCKS5 — обращаюсь к Telegram напрямую", proxy_url)
+        return urllib.request.build_opener()
+    return urllib.request.build_opener(_SocksHTTPSHandler((parsed.hostname, parsed.port or 1080)))
+
+
 class Telegram:
     """Minimal Bot API client."""
 
-    def __init__(self, token: str, timeout: int = 60):
+    def __init__(self, token: str, timeout: int = 60, proxy_url: str | None = None):
         self.token = token
         self.timeout = timeout
+        self.proxy_url = proxy_url
+        self._opener = build_opener(proxy_url)
 
     def _url(self, method: str) -> str:
         return f"{API_BASE}/bot{self.token}/{method}"
@@ -80,7 +131,7 @@ class Telegram:
             self._url(method), data=data, headers={"Content-Type": "application/json"}
         )
         try:
-            with urllib.request.urlopen(req, timeout=timeout or self.timeout) as resp:
+            with self._opener.open(req, timeout=timeout or self.timeout) as resp:
                 body = json.loads(resp.read() or b"{}")
         except urllib.error.HTTPError as exc:
             raise TelegramError(f"{method}: HTTP {exc.code} {exc.read()[:200]!r}") from exc
@@ -128,7 +179,7 @@ class Telegram:
             headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
         )
         try:
-            with urllib.request.urlopen(req, timeout=300) as resp:
+            with self._opener.open(req, timeout=300) as resp:
                 payload = json.loads(resp.read() or b"{}")
         except urllib.error.HTTPError as exc:
             raise TelegramError(f"sendVideo: HTTP {exc.code} {exc.read()[:200]!r}") from exc
@@ -266,37 +317,6 @@ def handle_message(bot, cfg: Config, message: dict, clipper=None) -> None:
     )
 
 
-def install_socks_proxy(proxy_url: str) -> bool:
-    """Route every socket through the SOCKS5 proxy.
-
-    The host has no direct route to api.telegram.org (only 127.0.0.1:10808), so
-    the whole process is pointed at the proxy once at start-up. Safe here: the
-    bot does nothing else with sockets.
-    """
-    from urllib.parse import urlparse
-
-    parsed = urlparse(proxy_url)
-    if parsed.scheme not in {"socks5", "socks5h", "socks4"}:
-        log.warning("Прокси %s не SOCKS — оставляю прямой доступ", proxy_url)
-        return False
-    try:
-        import socks  # PySocks
-    except ImportError:  # pragma: no cover - dependency is required for real runs
-        log.error("Не установлен PySocks: uv pip install PySocks")
-        return False
-    import socket
-
-    socks.set_default_proxy(
-        socks.SOCKS5 if parsed.scheme != "socks4" else socks.SOCKS4,
-        parsed.hostname,
-        parsed.port or 1080,
-        rdns=True,
-    )
-    socket.socket = socks.socksocket
-    log.info("Telegram API через прокси %s", proxy_url)
-    return True
-
-
 def read_token(token_file: Path) -> str | None:
     try:
         token = token_file.read_text(encoding="utf-8").strip()
@@ -321,10 +341,7 @@ def run_bot(config_path: str | None = None, token_file: Path | None = None) -> i
         )
         return 2
 
-    if cfg.proxy:
-        install_socks_proxy(cfg.proxy)
-
-    bot = Telegram(token)
+    bot = Telegram(token, proxy_url=cfg.proxy)
     me = bot.call("getMe")
     log.info("Бот @%s запущен, хранение %d мин", me.get("username"), cfg.retention_minutes)
     print(f"video-clipper-bot: @{me.get('username')}, retention {cfg.retention_minutes} мин")

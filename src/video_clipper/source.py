@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -10,6 +11,7 @@ from typing import Any, Callable, Iterable
 
 from .config import Config
 from .probe import MediaInfo, probe_media
+from .segments import Segment
 from .storage import find_cached_source
 
 log = logging.getLogger("video_clipper")
@@ -28,6 +30,9 @@ class Source:
     is_temporary: bool
     info: MediaInfo
     url: str | None = None
+    # Section downloads start at 0, so segment times must be shifted by this.
+    offset: float = 0.0
+    kind: str = "full"
 
     def cleanup(self) -> None:
         """Remove the downloaded file and an empty cache directory."""
@@ -93,6 +98,13 @@ def prepare_source(
 SECTION_COVERAGE = 0.4
 
 
+def shift_segments(segments: list[Segment], offset: float) -> list[Segment]:
+    """Map requested times onto a section file that starts at 0."""
+    if not offset:
+        return segments
+    return [Segment(s.start - offset, s.end - offset, s.name) for s in segments]
+
+
 def _build_download_ranges(segments: list[tuple[float, float]]):
     def ranges(info: dict[str, Any], ydl: Any) -> list[dict[str, float]]:  # noqa: ARG001
         return [{"start_time": s, "end_time": e} for s, e in segments]
@@ -115,6 +127,10 @@ def _download(
     cache_dir = cfg.cache_dir
     cache_dir.mkdir(parents=True, exist_ok=True)
     height = cfg.default_resolution
+    # Sections are derived artefacts: kept out of the reuse cache and deleted
+    # right after cutting, so a later request for another part of the same video
+    # never mistakes a section for the whole file.
+    sections_dir = cache_dir / "sections"
     outtmpl = str(cache_dir / "%(title).80s-%(id)s.%(ext)s")
 
     opts: dict[str, Any] = {
@@ -150,35 +166,82 @@ def _download(
 
     duration = float(meta.get("duration") or 0.0)
     opts = dict(opts)
-    if (
-        cfg.use_sections
-        and segments
-        and duration > 0
-        and _coverage(segments, duration) <= SECTION_COVERAGE
-    ):
+    sections = bool(
+        segments and duration > 0 and _coverage(segments, duration) <= SECTION_COVERAGE
+    )
+
+    # Section downloads are cut by ffmpeg, which cannot use SOCKS5; a local
+    # HTTP→SOCKS bridge makes ffmpeg work. Everything falls back to a full
+    # download if the bridged attempt fails.
+    bridge = None
+    saved_env: dict[str, str | None] = {}
+    if sections:
+        from .httpproxy import HttpBridge
+
+        bridge = HttpBridge(cfg.proxy)
+        bridge_url = bridge.start()
+        for key in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"):
+            saved_env[key] = os.environ.get(key)
+            os.environ[key] = bridge_url
+        sections_dir.mkdir(parents=True, exist_ok=True)
+        for stale in sections_dir.iterdir():
+            if stale.is_file():
+                stale.unlink(missing_ok=True)
+        opts["outtmpl"] = str(sections_dir / "%(title).60s-%(id)s.%(ext)s")
+        opts["proxy"] = bridge_url
         opts["download_ranges"] = _build_download_ranges(segments)
         opts["force_keyframes_at_cuts"] = True
         log.info(
-            "Отрезки покрывают %.0f%% видео — скачиваю только нужные участки",
+            "Отрезки покрывают %.0f%% видео — качаю только нужные участки (через мост %s)",
             _coverage(segments, duration) * 100,
+            bridge_url,
         )
 
     log.info("Скачивание %s (макс. %sp)", url, height)
     try:
-        info = extract(url, opts)
+        try:
+            info = extract(url, opts)
+        except Exception as exc:
+            if not sections:
+                raise
+            log.warning("Секционная загрузка не удалась (%s) — качаю видео целиком", exc)
+            _clear_partials(cfg.cache_dir)
+            opts.pop("download_ranges", None)
+            opts.pop("force_keyframes_at_cuts", None)
+            for key, value in saved_env.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+            if bridge is not None:
+                bridge.stop()
+                bridge = None
+            opts["proxy"] = cfg.proxy
+            info = extract(url, opts)
     except Exception as exc:  # yt-dlp raises its own DownloadError hierarchy
         raise SourceError(f"Не удалось скачать {url}: {exc}") from exc
+    finally:
+        for key, value in saved_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        if bridge is not None:
+            bridge.stop()
 
     path = _downloaded_path(info)
     if not path or not path.is_file():
         raise SourceError(f"yt-dlp не вернул путь к файлу для {url}")
 
+    offset = min((s for s, _ in segments), default=0.0) if sections else 0.0
     return Source(
         path=path,
         title=str(info.get("title") or path.stem),
-        is_temporary=not keep_source,
+        is_temporary=True if sections else not keep_source,
         info=probe_media(str(path), cfg.ffprobe_path),
         url=url,
+        offset=offset,
+        kind="section" if sections else "full",
     )
 
 
@@ -187,6 +250,16 @@ def _ytdlp_extract(url: str, opts: dict[str, Any]) -> dict[str, Any]:
 
     with yt_dlp.YoutubeDL(opts) as ydl:
         return ydl.extract_info(url, download=True)
+
+
+def _clear_partials(cache_dir: Path) -> None:
+    """Drop .part/.ytdl leftovers so the fallback download starts clean."""
+    for pattern in ("*.part", "*.ytdl", "*.temp"):
+        for leftover in cache_dir.glob(pattern):
+            try:
+                leftover.unlink()
+            except OSError:  # pragma: no cover
+                pass
 
 
 def _downloaded_path(info: dict[str, Any]) -> Path | None:

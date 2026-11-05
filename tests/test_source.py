@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from video_clipper.config import load_config
+from video_clipper.segments import Segment
 from video_clipper.source import Source, SourceError, is_url, prepare_source
 
 pytestmark = pytest.mark.skipif(
@@ -56,6 +57,26 @@ class TestLocalSource:
             prepare_source(str(tmp_path / "nope.mp4"), load_config(None))
 
 
+class TestShiftSegments:
+    def test_shift_for_section_file(self):
+        from video_clipper.source import shift_segments
+
+        shifted = shift_segments([Segment(2415, 2553)], 2415)
+        assert (shifted[0].start, shifted[0].end) == (0.0, 138.0)
+
+    def test_no_offset_keeps_segments(self):
+        from video_clipper.source import shift_segments
+
+        segs = [Segment(10, 20)]
+        assert shift_segments(segs, 0.0) is segs
+
+    def test_offset_is_applied_to_every_segment(self):
+        from video_clipper.source import shift_segments
+
+        shifted = shift_segments([Segment(100, 110), Segment(200, 210)], 100)
+        assert [(s.start, s.end) for s in shifted] == [(0, 10), (100, 110)]
+
+
 class TestDownload:
     def test_uses_config_proxy_and_cookies(self, tmp_path, sample_video):
         cfg_file = tmp_path / "config.json"
@@ -87,14 +108,16 @@ class TestDownload:
         assert src.path == sample_video
         assert src.is_temporary is True
         download_opts = seen[-1]
-        assert download_opts["proxy"] == "socks5://127.0.0.1:10808"
+        # ffmpeg cannot use SOCKS5, so downloads go through the local HTTP bridge
+        # that tunnels to it; the SOCKS address itself is no longer passed on.
+        assert download_opts["proxy"].startswith("http://127.0.0.1:")
         assert download_opts["cookiefile"] == str(cookies)
         assert "480" in download_opts["format"]
         # 10 s out of 600 s coverage → only sections are fetched
         assert "download_ranges" in download_opts
 
-    def test_sections_are_off_by_default(self, sample_video, tmp_path):
-        """Section downloads hang on some sites, so they stay opt-in."""
+    def test_sections_used_for_small_coverage(self, sample_video, tmp_path):
+        """A 10 s piece of a 600 s video is fetched as a section, not whole."""
         seen: list[dict] = []
 
         def fake_downloader(url, opts):
@@ -105,7 +128,7 @@ class TestDownload:
 
         cfg = load_config(None).with_overrides(cache_dir=tmp_path / "cache")
         prepare_source("https://youtu.be/x", cfg, segments=[(10, 20)], downloader=fake_downloader)
-        assert "download_ranges" not in seen[-1]
+        assert "download_ranges" in seen[-1]
 
     def test_full_download_when_coverage_is_large(self, sample_video, tmp_path):
         def fake_downloader(url, opts):

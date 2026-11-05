@@ -215,30 +215,33 @@ def _run_job(
 def default_clipper(source: str, segments: list[Segment], fast: bool, cfg: Config, progress=None) -> list[ClipResult]:
     """Download (if needed), validate and cut — the same path the CLI uses."""
     from .cut import cut_segment
-    from .source import prepare_source
+    from .source import prepare_source, shift_segments
 
     if progress:
         progress("Подготовка источника...")
     src = prepare_source(source, cfg, segments=[(s.start, s.end) for s in segments])
     try:
+        original_segments = segments
+        segments = shift_segments(segments, src.offset)
         validate_segments(segments, duration=src.info.duration or None)
         out_dir = Path(cfg.output_dir).expanduser()
         out_dir.mkdir(parents=True, exist_ok=True)
         slug = source_slug(source)
         results = []
-        for seg in segments:
+        for i, seg in enumerate(segments):
+            shown = original_segments[i] if i < len(original_segments) else seg
             if progress:
-                progress(f"Нарезка {seg.label}")
-            results.append(
-                cut_segment(
-                    str(src.path),
-                    out_dir / output_filename(slug, seg),
-                    seg,
-                    fast=fast,
-                    ffmpeg_path=cfg.ffmpeg_path,
-                    has_audio=src.info.has_audio,
-                )
+                progress(f"Нарезка {shown.label}")
+            result = cut_segment(
+                str(src.path),
+                out_dir / output_filename(slug, shown),
+                seg,
+                fast=fast,
+                ffmpeg_path=cfg.ffmpeg_path,
+                has_audio=src.info.has_audio,
             )
+            result.segment = shown
+            results.append(result)
         return results
     finally:
         src.cleanup()

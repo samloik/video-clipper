@@ -15,7 +15,7 @@ from .segments import (
     source_slug,
     validate_segments,
 )
-from .source import is_url, prepare_source
+from .source import is_url, prepare_source, shift_segments
 from .storage import sweep, touch
 
 log = logging.getLogger("video_clipper")
@@ -53,6 +53,10 @@ def run_pipeline(args: Any, cfg: Config) -> list[ClipResult]:
         keep_source=keep_source,
     )
     try:
+        # A section download starts at 0, so absolute times are mapped onto it;
+        # file names and reports keep the times the user asked for.
+        original_segments = segments
+        segments = shift_segments(segments, src.offset)
         validate_segments(
             segments,
             duration=src.info.duration if src.info.duration > 0 else None,
@@ -67,21 +71,22 @@ def run_pipeline(args: Any, cfg: Config) -> list[ClipResult]:
         ensure_free_space(out_dir)
         results = []
         for i, seg in enumerate(segments):
+            shown = original_segments[i] if i < len(original_segments) else seg
             name = args.name if (getattr(args, "name", None) and len(segments) == 1) else None
-            out_path = out_dir / output_filename(slug, seg, name)
-            results.append(
-                cut_segment(
-                    str(src.path),
-                    out_path,
-                    seg,
-                    fast=fast,
-                    ffmpeg_path=cfg.ffmpeg_path,
-                    has_audio=src.info.has_audio,
-                )
+            out_path = out_dir / output_filename(slug, shown, name)
+            result = cut_segment(
+                str(src.path),
+                out_path,
+                seg,
+                fast=fast,
+                ffmpeg_path=cfg.ffmpeg_path,
+                has_audio=src.info.has_audio,
             )
+            result.segment = shown
+            results.append(result)
         return results
     finally:
-        if src.is_temporary and not keep_source:
+        if src.kind == "section" or (src.is_temporary and not keep_source):
             src.cleanup()
         else:
             touch(src.path)
