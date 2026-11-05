@@ -30,12 +30,28 @@ VERTICAL_CROP_FILTER = (
     "scale={w}:{h}:force_original_aspect_ratio=increase,"
     "crop={w}:{h},setsar=1"
 )
+# The backdrop is blurred anyway, so it is built at 1/4 size and scaled up:
+# gblur at 1080x1920 costs minutes per clip on a small VM, at 270x480 — seconds,
+# with no visible difference after the upscale.
+BLUR_BG_SCALE = 4
+
 VERTICAL_BLUR_FILTER = (
-    "[0:v]scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},"
-    "gblur=sigma=20[bg];"
+    "[0:v]scale={bw}:{bh}:force_original_aspect_ratio=increase,crop={bw}:{bh},"
+    "gblur=sigma=8,scale={w}:{h}[bg];"
     "[0:v]scale={w}:{h}:force_original_aspect_ratio=decrease[fg];"
     "[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1"
 )
+
+
+def pick_vertical_size(source_height: int | None, width: int = 1080, height: int = 1920) -> tuple[int, int]:
+    """Do not upscale a small source into 1080x1920 for no reason.
+
+    A 720p source gives a 405x720 crop; blowing it up to 1080x1920 costs ~2x the
+    encode time and adds no detail, so 720x1280 is used instead.
+    """
+    if source_height and source_height <= 720:
+        return (min(width, 720), min(height, 1280))
+    return (width, height)
 
 
 def vertical_name(filename: str, vertical: bool, layout: str = "crop") -> str:
@@ -51,7 +67,15 @@ def vertical_args(layout: str = "crop", size: tuple[int, int] = VERTICAL_SIZE) -
     """ffmpeg video-filter arguments for a 9:16 frame."""
     width, height = size
     if layout == "blur":
-        return ["-filter_complex", VERTICAL_BLUR_FILTER.format(w=width, h=height)]
+        return [
+            "-filter_complex",
+            VERTICAL_BLUR_FILTER.format(
+                w=width,
+                h=height,
+                bw=max(2, width // BLUR_BG_SCALE) // 2 * 2,
+                bh=max(2, height // BLUR_BG_SCALE) // 2 * 2,
+            ),
+        ]
     return ["-vf", VERTICAL_CROP_FILTER.format(w=width, h=height)]
 
 
@@ -133,6 +157,7 @@ def cut_segment(
     vertical: bool = False,
     layout: str = "crop",
     vertical_size: tuple[int, int] = VERTICAL_SIZE,
+    timeout: float | None = None,
 ) -> ClipResult:
     """Run ffmpeg for one segment and return the result."""
     out_path = Path(out)
@@ -154,7 +179,13 @@ def cut_segment(
     log.info("Нарезка %s: %s → %s", mode, seg.label, out_path.name)
     log.debug("ffmpeg: %s", " ".join(cmd))
 
-    proc = runner(cmd, capture_output=True, text=True, check=False)
+    try:
+        proc = runner(cmd, capture_output=True, text=True, check=False, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        raise CutError(
+            f"ffmpeg не успел обработать {seg.label} за {timeout} с — отрезок слишком длинный "
+            f"для этого режима, попробуй покороче или --fast"
+        ) from exc
     if proc.returncode != 0:
         tail = (proc.stderr or "").strip().splitlines()[-5:]
         raise CutError(

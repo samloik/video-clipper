@@ -233,7 +233,7 @@ def default_clipper(
     layout: str = "crop",
 ) -> list[ClipResult]:
     """Download (if needed), validate and cut — the same path the CLI uses."""
-    from .cut import cut_segment, vertical_name
+    from .cut import cut_segment, pick_vertical_size, vertical_name
     from .source import prepare_source, shift_segments
 
     if progress:
@@ -260,7 +260,9 @@ def default_clipper(
                 has_audio=src.info.has_audio,
                 vertical=vertical,
                 layout=layout,
-                vertical_size=(cfg.vertical_width, cfg.vertical_height),
+                vertical_size=pick_vertical_size(
+                    src.info.height, cfg.vertical_width, cfg.vertical_height
+                ),
             )
             result.segment = shown
             results.append(result)

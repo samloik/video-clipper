@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import Config
-from .cut import ClipResult, cut_segment, ensure_free_space, vertical_name
+from .cut import ClipResult, cut_segment, ensure_free_space, pick_vertical_size, vertical_name
 from .segments import (
     Segment,
     build_segments,
@@ -32,7 +32,6 @@ def run_pipeline(args: Any, cfg: Config) -> list[ClipResult]:
     fast = bool(getattr(args, "fast", False))
     vertical = bool(getattr(args, "vertical", False) or getattr(args, "blur", False))
     layout = "blur" if bool(getattr(args, "blur", False)) else "crop"
-    vertical_size = (cfg.vertical_width, cfg.vertical_height)
     dry_run = bool(getattr(args, "dry_run", False))
     keep_source = bool(getattr(args, "keep_source", False)) or cfg.keep_source
     source_value = str(args.source)
@@ -86,7 +85,9 @@ def run_pipeline(args: Any, cfg: Config) -> list[ClipResult]:
                 has_audio=src.info.has_audio,
                 vertical=vertical,
                 layout=layout,
-                vertical_size=vertical_size,
+                vertical_size=pick_vertical_size(
+                    src.info.height, cfg.vertical_width, cfg.vertical_height
+                ),
             )
             result.segment = shown
             results.append(result)

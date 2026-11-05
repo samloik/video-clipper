@@ -73,6 +73,31 @@ class TestSweep:
         assert items[0]["name"] == "a.mp4" and items[0]["size"] == 4
 
 
+class TestWorker:
+    def test_job_runs_in_background_thread(self):
+        import threading
+
+        from video_clipper.bot import run_in_worker
+
+        done = threading.Event()
+        main_thread = threading.current_thread()
+
+        def job():
+            assert threading.current_thread() is not main_thread
+            done.set()
+
+        run_in_worker(job)
+        assert done.wait(5), "задание должно выполниться в отдельном потоке"
+
+    def test_exception_in_job_does_not_kill_worker(self):
+        from video_clipper.bot import run_in_worker
+
+        done = __import__("threading").Event()
+        run_in_worker(lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+        run_in_worker(done.set)
+        assert done.wait(5)
+
+
 class TestParseRequest:
     def test_range(self):
         req = parse_request("https://vm.tiktok.com/ZSpFs5jXJ/ 0:10-0:20")

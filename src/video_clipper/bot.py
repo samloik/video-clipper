@@ -24,6 +24,7 @@ import json
 import logging
 import mimetypes
 import re
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -204,6 +205,24 @@ class Telegram:
 # job key -> what is needed to re-cut without touching the network again
 JOBS: dict[str, dict] = {}
 
+# Telegram polling must never wait for ffmpeg: one heavy job at a time runs in a
+# background thread, so buttons and messages keep being accepted meanwhile.
+WORK_SLOT = threading.Semaphore(1)
+FFMPEG_TIMEOUT = 1800
+
+
+def run_in_worker(fn, *args) -> None:
+    """Start ``fn`` in a thread, serialised by WORK_SLOT."""
+
+    def _wrap() -> None:
+        with WORK_SLOT:
+            try:
+                fn(*args)
+            except Exception:  # noqa: BLE001 — a failed job must not kill the thread
+                log.exception("Сбой фонового задания")
+
+    threading.Thread(target=_wrap, daemon=True).start()
+
 
 def recut_keyboard(
     job_key: str,
@@ -244,7 +263,7 @@ def clip_for_bot(
     The CLI removes the download after cutting; the bot must not, otherwise the
     "без перекодирования" button would have to download everything again.
     """
-    from .cut import cut_segment, vertical_name
+    from .cut import cut_segment, pick_vertical_size, vertical_name
     from .segments import output_filename, source_slug, validate_segments
     from .source import prepare_source, shift_segments
 
@@ -267,11 +286,15 @@ def clip_for_bot(
             has_audio=src.info.has_audio,
             vertical=vertical,
             layout=layout,
-            vertical_size=(cfg.vertical_width, cfg.vertical_height),
+            vertical_size=pick_vertical_size(
+                src.info.height, cfg.vertical_width, cfg.vertical_height
+            ),
+            timeout=FFMPEG_TIMEOUT,
         )
         result.segment = shown
         results.append(result)
     job = {
+        "height": src.info.height,
         "vertical": vertical,
         "layout": layout,
         "path": str(src.path),
@@ -471,10 +494,20 @@ def handle_callback(bot, cfg: Config, callback: dict) -> None:
         answer("Исходник уже удалён — пришли ссылку заново")
         return
 
-    answer("Режу вертикально..." if vertical else "Режу без перекодирования...")
+    total = sum(item["end"] - item["start"] for item in job["segments"])
+    if vertical:
+        answer("Режу вертикально...")
+        bot.send_message(
+            chat_id,
+            f"Режу вертикально: {total:.0f} с видео, обычно 1–3 минуты. "
+            f"Пришлю сюда, как будет готово.",
+        )
+    else:
+        answer("Режу без перекодирования...")
+        bot.send_message(chat_id, f"Режу без перекодирования: {total:.0f} с, это быстро.")
     bot.send_chat_action(chat_id, "record_video")
 
-    from .cut import vertical_name
+    from .cut import pick_vertical_size, vertical_name
     from .segments import Segment, output_filename, source_slug
 
     out_dir = Path(cfg.output_dir).expanduser()
@@ -497,7 +530,10 @@ def handle_callback(bot, cfg: Config, callback: dict) -> None:
                 has_audio=bool(job.get("has_audio", True)),
                 vertical=vertical,
                 layout=layout,
-                vertical_size=(cfg.vertical_width, cfg.vertical_height),
+                vertical_size=pick_vertical_size(
+                    job.get("height"), cfg.vertical_width, cfg.vertical_height
+                ),
+                timeout=FFMPEG_TIMEOUT,
             )
         except Exception as exc:  # noqa: BLE001
             bot.send_message(chat_id, f"Не смог перерезать: {exc}")
@@ -566,9 +602,9 @@ def run_bot(config_path: str | None = None, token_file: Path | None = None) -> i
             offset = int(update["update_id"]) + 1
             try:
                 if update.get("callback_query"):
-                    handle_callback(bot, cfg, update["callback_query"])
+                    run_in_worker(handle_callback, bot, cfg, update["callback_query"])
                 else:
-                    handle_message(bot, cfg, update.get("message") or {})
+                    run_in_worker(handle_message, bot, cfg, update.get("message") or {})
             except Exception:  # noqa: BLE001 — one bad update must not kill the loop
                 log.exception("Сбой обработки обновления")
         if time.time() - last_sweep > 60:

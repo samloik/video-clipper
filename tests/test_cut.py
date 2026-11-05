@@ -65,7 +65,10 @@ class TestVertical:
         cmd = build_ffmpeg_command("in.mp4", "out.mp4", Segment(0, 1), vertical=True, layout="blur")
         joined = " ".join(cmd)
         assert "-filter_complex" in cmd
-        assert "gblur=sigma=20" in joined and "overlay=(W-w)/2:(H-h)/2" in joined
+        # blur is computed on a small backdrop (270x480) and scaled up
+        assert "gblur=sigma=8" in joined
+        assert "scale=270:480" in joined
+        assert "overlay=(W-w)/2:(H-h)/2" in joined
 
     def test_vertical_ignores_fast(self):
         cmd = build_ffmpeg_command("in.mp4", "out.mp4", Segment(0, 1), fast=True, vertical=True)
@@ -74,6 +77,14 @@ class TestVertical:
     def test_custom_size(self):
         cmd = build_ffmpeg_command("in.mp4", "out.mp4", Segment(0, 1), vertical=True, vertical_size=(720, 1280))
         assert "crop=720:1280" in " ".join(cmd)
+
+    def test_pick_vertical_size_caps_720p_sources(self):
+        from video_clipper.cut import pick_vertical_size
+
+        assert pick_vertical_size(720) == (720, 1280)
+        assert pick_vertical_size(480) == (720, 1280)
+        assert pick_vertical_size(1080) == (1080, 1920)
+        assert pick_vertical_size(None) == (1080, 1920)
 
     def test_vertical_name(self):
         from video_clipper.cut import vertical_name
