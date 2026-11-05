@@ -266,6 +266,37 @@ def handle_message(bot, cfg: Config, message: dict, clipper=None) -> None:
     )
 
 
+def install_socks_proxy(proxy_url: str) -> bool:
+    """Route every socket through the SOCKS5 proxy.
+
+    The host has no direct route to api.telegram.org (only 127.0.0.1:10808), so
+    the whole process is pointed at the proxy once at start-up. Safe here: the
+    bot does nothing else with sockets.
+    """
+    from urllib.parse import urlparse
+
+    parsed = urlparse(proxy_url)
+    if parsed.scheme not in {"socks5", "socks5h", "socks4"}:
+        log.warning("Прокси %s не SOCKS — оставляю прямой доступ", proxy_url)
+        return False
+    try:
+        import socks  # PySocks
+    except ImportError:  # pragma: no cover - dependency is required for real runs
+        log.error("Не установлен PySocks: uv pip install PySocks")
+        return False
+    import socket
+
+    socks.set_default_proxy(
+        socks.SOCKS5 if parsed.scheme != "socks4" else socks.SOCKS4,
+        parsed.hostname,
+        parsed.port or 1080,
+        rdns=True,
+    )
+    socket.socket = socks.socksocket
+    log.info("Telegram API через прокси %s", proxy_url)
+    return True
+
+
 def read_token(token_file: Path) -> str | None:
     try:
         token = token_file.read_text(encoding="utf-8").strip()
@@ -289,6 +320,9 @@ def run_bot(config_path: str | None = None, token_file: Path | None = None) -> i
             cfg.telegram_token_file,
         )
         return 2
+
+    if cfg.proxy:
+        install_socks_proxy(cfg.proxy)
 
     bot = Telegram(token)
     me = bot.call("getMe")
