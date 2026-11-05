@@ -1,0 +1,13 @@
+{
+  "output_dir": "./output",
+  "cache_dir": "./cache",
+  "default_resolution": 720,
+  "cookies": "~/programs/download-video-from-youtube/youtube_cookies.txt",
+  "proxy": "socks5://127.0.0.1:10808",
+  "ffmpeg_path": "ffmpeg",
+  "ffprobe_path": "ffprobe",
+  "keep_source": false,
+  "gui_host": "127.0.0.1",
+  "gui_port": 8765,
+  "log_file": "./video-clipper.log"
+}

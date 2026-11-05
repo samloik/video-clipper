@@ -1,0 +1,148 @@
+"""Unit tests for segment building, validation and file naming."""
+
+import json
+
+import pytest
+
+from video_clipper.segments import (
+    Segment,
+    build_segments,
+    load_csv,
+    load_json,
+    output_filename,
+    parse_range_spec,
+    source_slug,
+    validate_segments,
+)
+
+
+class TestParseRangeSpec:
+    def test_simple(self):
+        seg = parse_range_spec("1:12-1:45")
+        assert (seg.start, seg.end, seg.duration) == (72.0, 105.0, 33.0)
+
+    def test_full_timecodes(self):
+        seg = parse_range_spec("00:00:10.5-00:00:20")
+        assert seg.start == 10.5 and seg.end == 20.0
+
+    def test_missing_separator(self):
+        with pytest.raises(ValueError, match="НАЧАЛО-КОНЕЦ"):
+            parse_range_spec("1:12")
+
+    def test_broken_timecode(self):
+        with pytest.raises(ValueError):
+            parse_range_spec("abc-def")
+
+
+class TestLoadCsv:
+    def test_without_header(self, tmp_path):
+        f = tmp_path / "clips.csv"
+        f.write_text("0:10,0:20\n1:00,1:30,intro\n", encoding="utf-8")
+        segs = load_csv(f)
+        assert [(s.start, s.end, s.name) for s in segs] == [
+            (10.0, 20.0, None),
+            (60.0, 90.0, "intro"),
+        ]
+
+    def test_with_header_and_comments(self, tmp_path):
+        f = tmp_path / "clips.csv"
+        f.write_text("# мои клипы\nstart,end,name\n0:05,0:10,\n", encoding="utf-8")
+        segs = load_csv(f)
+        assert len(segs) == 1 and segs[0].start == 5.0
+
+    def test_empty_file(self, tmp_path):
+        f = tmp_path / "clips.csv"
+        f.write_text("# nothing\n", encoding="utf-8")
+        with pytest.raises(ValueError, match="ни одного отрезка"):
+            load_csv(f)
+
+    def test_missing_file(self, tmp_path):
+        with pytest.raises(FileNotFoundError):
+            load_csv(tmp_path / "nope.csv")
+
+
+class TestLoadJson:
+    def test_dicts(self, tmp_path):
+        f = tmp_path / "clips.json"
+        f.write_text(json.dumps([{"start": "0:01", "end": "0:02"}]), encoding="utf-8")
+        assert load_json(f)[0].duration == 1.0
+
+    def test_pairs_and_strings(self, tmp_path):
+        f = tmp_path / "clips.json"
+        f.write_text(json.dumps([["0:01", "0:02"], "0:10-0:12"]), encoding="utf-8")
+        segs = load_json(f)
+        assert [s.start for s in segs] == [1.0, 10.0]
+
+    def test_not_a_list(self, tmp_path):
+        f = tmp_path / "clips.json"
+        f.write_text(json.dumps({"start": "0:01", "end": "0:02"}), encoding="utf-8")
+        with pytest.raises(ValueError, match="JSON-массив"):
+            load_json(f)
+
+
+class TestBuildSegments:
+    def test_from_ranges(self):
+        segs = build_segments(ranges=["0:01-0:02", "0:10-0:12"])
+        assert len(segs) == 2
+
+    def test_combines_sources(self, tmp_path):
+        f = tmp_path / "clips.csv"
+        f.write_text("0:30,0:40\n", encoding="utf-8")
+        segs = build_segments(ranges=["0:01-0:02"], csv_path=str(f))
+        assert len(segs) == 2
+
+    def test_no_segments(self):
+        with pytest.raises(ValueError, match="Не задан ни один отрезок"):
+            build_segments()
+
+    def test_name_requires_single_segment(self):
+        with pytest.raises(ValueError, match="только для одного отрезка"):
+            build_segments(ranges=["0:01-0:02", "0:10-0:12"], name="intro")
+
+
+class TestValidateSegments:
+    def test_ok(self):
+        validate_segments([Segment(1, 2), Segment(10, 12)], duration=60)
+
+    def test_end_before_start(self):
+        with pytest.raises(ValueError, match="должен быть больше начала"):
+            validate_segments([Segment(10, 10)])
+
+    def test_beyond_duration(self):
+        with pytest.raises(ValueError, match="выходит за длительность"):
+            validate_segments([Segment(1, 100)], duration=60)
+
+    def test_overlap_rejected(self):
+        with pytest.raises(ValueError, match="пересекаются"):
+            validate_segments([Segment(1, 10), Segment(5, 12)])
+
+    def test_overlap_allowed_by_flag(self):
+        validate_segments([Segment(1, 10), Segment(5, 12)], allow_overlap=True)
+
+    def test_empty(self):
+        with pytest.raises(ValueError, match="пуст"):
+            validate_segments([])
+
+
+class TestNames:
+    def test_default_name(self):
+        seg = Segment(72.25, 105.5)
+        assert output_filename("video", seg) == "video__000112-250__000145-500.mp4"
+
+    def test_explicit_name(self):
+        assert output_filename("video", Segment(1, 2), name="intro") == "intro.mp4"
+
+    def test_name_from_segment(self):
+        assert output_filename("video", Segment(1, 2, name="best moment")) == "best_moment.mp4"
+
+    def test_name_keeps_mp4_suffix(self):
+        assert output_filename("video", Segment(1, 2), name="clip.mp4") == "clip.mp4"
+
+    def test_source_slug_local(self):
+        assert source_slug("/home/alex/Videos/My Video.mp4") == "my_video"
+
+    def test_source_slug_url(self):
+        assert source_slug("https://youtu.be/dQw4w9WgXcQ") == "dqw4w9wgxcq"
+
+    def test_source_slug_cyrillic(self):
+        assert source_slug("/tmp/Отпуск 2026.mp4") == "otpusk_2026"
