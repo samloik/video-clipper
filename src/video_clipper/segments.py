@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import json
 import re
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -58,6 +59,82 @@ def source_slug(source: str) -> str:
             return slugify(parts[-1], "clip")
         return slugify(parsed.netloc, "clip")
     return slugify(Path(source).stem, "clip")
+
+
+_FORBIDDEN = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+
+_KEEP_CATEGORIES = frozenset("LNPZ")
+
+
+def safe_part(text: str, limit: int = 80) -> str:
+    """Human-readable name fragment: letters, digits and punctuation; no emoji or control marks."""
+    cleaned = _FORBIDDEN.sub("", str(text))
+    cleaned = "".join(
+        ch for ch in cleaned if unicodedata.category(ch)[0] in _KEEP_CATEGORIES
+    )
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" ._-")
+    cleaned = re.sub(r"_{2,}", "_", cleaned)
+    return cleaned[:limit].strip(" ._-")
+
+
+def source_ref(source: str) -> str:
+    """Filesystem-safe reference to the source: ``youtube.com-<id>`` or the file name."""
+    if "://" in source:
+        parsed = urlparse(source)
+        video_id = parse_qs(parsed.query).get("v", [""])[0]
+        parts = [p for p in parsed.path.split("/") if p]
+        tail = video_id or (parts[-1] if parts else "")
+        host = parsed.netloc.lower().removeprefix("www.")
+        return safe_part(f"{host}-{tail}" if tail else host, 60)
+    return safe_part(Path(source).name, 60)
+
+
+def span_timecode(seconds: float) -> str:
+    """``MM:SS`` under an hour, ``H:MM:SS`` above — the way users type timecodes."""
+    total = round(float(seconds), 3)
+    hours, rest = divmod(total, 3600)
+    minutes, secs = divmod(rest, 60)
+    whole = int(secs)
+    millis = int(round((secs - whole) * 1000))
+    secs_text = f"{whole:02d}" if not millis else f"{whole:02d}.{millis:03d}".rstrip("0")
+    if hours >= 1:
+        return f"{int(hours)}:{int(minutes):02d}:{secs_text}"
+    return f"{int(minutes):02d}:{secs_text}"
+
+
+def clip_filename(
+    title: str | None,
+    source: str,
+    seg: Segment,
+    name: str | None = None,
+    span: str | None = None,
+    suffix: str = "",
+) -> str:
+    """``Название - ссылка - [29:00-31:59].mp4``.
+
+    ``title`` is what a human recognises (video title), ``source`` adds the origin so a
+    clip can be traced back. ``span`` replaces the timecode brackets (``весь ролик``),
+    ``suffix`` marks a variant (``-fast``), and ``name`` still wins over everything.
+    """
+    if name or seg.name:
+        return output_filename(slugify(title or source), seg, name)
+
+    base = safe_part(title or "", 80)
+    ref = source_ref(source)
+    if not base:
+        base, ref = ref, ""
+    elif "://" not in source and ref and Path(source).stem == title:
+        ref = ""  # a local file named like its own title adds nothing
+    if ref and ref.lower() in base.lower():
+        ref = ""
+
+    bracket = f"[{span}]" if span else f"[{span_timecode(seg.start)}-{span_timecode(seg.end)}]"
+    parts = [base, ref, bracket]
+    stem = " - ".join(p for p in parts if p)
+    if suffix:
+        stem = f"{stem}{suffix}"
+    return f"{stem}.mp4"
 
 
 def parse_range_spec(spec: str) -> Segment:

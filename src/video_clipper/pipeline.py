@@ -18,8 +18,7 @@ from .cut import (
 from .segments import (
     Segment,
     build_segments,
-    output_filename,
-    source_slug,
+    clip_filename,
     validate_segments,
 )
 from .source import is_url, prepare_source, shift_segments
@@ -45,7 +44,6 @@ def run_pipeline(args: Any, cfg: Config) -> list[ClipResult]:
     keep_source = bool(getattr(args, "keep_source", False)) or cfg.keep_source
     source_value = str(args.source)
     sweep([cfg.cache_dir], cfg.retention_minutes)
-    slug = source_slug(source_value)
     out_dir = Path(cfg.output_dir).expanduser()
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -55,7 +53,7 @@ def run_pipeline(args: Any, cfg: Config) -> list[ClipResult]:
             log.info("dry-run: будет скачан весь ролик целиком → %s", out_dir)
             return []
         validate_segments(segments, duration=None, allow_overlap=args.allow_overlap)
-        results = [_planned(slug, seg, out_dir, fast, i, len(segments)) for i, seg in enumerate(segments)]
+        results = [_planned(None, source_value, seg, out_dir, fast) for seg in segments]
         for res in results:
             log.info("dry-run: %s", res.output_path)
         return results
@@ -74,7 +72,9 @@ def run_pipeline(args: Any, cfg: Config) -> list[ClipResult]:
             segments = [Segment(0.0, round(src.info.duration, 3))]
             log.info("Ролик целиком: %.1f с", src.info.duration)
             if not vertical and not fast:
-                out_path = out_dir / vertical_name(f"{slug}__full.mp4", False)
+                out_path = out_dir / clip_filename(
+                    src.title, source_value, segments[0], span="весь ролик"
+                )
                 result = copy_whole(str(src.path), out_path, ffmpeg_path=cfg.ffmpeg_path)
                 return [result]
         # A section download starts at 0, so absolute times are mapped onto it;
@@ -87,7 +87,9 @@ def run_pipeline(args: Any, cfg: Config) -> list[ClipResult]:
             allow_overlap=args.allow_overlap,
         )
         if dry_run:
-            results = [_planned(slug, seg, out_dir, fast, i, len(segments)) for i, seg in enumerate(segments)]
+            results = [
+                _planned(src.title, source_value, seg, out_dir, fast) for seg in segments
+            ]
             for res in results:
                 log.info("dry-run: %s", res.output_path)
             return results
@@ -97,7 +99,9 @@ def run_pipeline(args: Any, cfg: Config) -> list[ClipResult]:
         for i, seg in enumerate(segments):
             shown = original_segments[i] if i < len(original_segments) else seg
             name = args.name if (getattr(args, "name", None) and len(segments) == 1) else None
-            out_path = out_dir / vertical_name(output_filename(slug, shown, name), vertical, layout)
+            out_path = out_dir / vertical_name(
+                clip_filename(src.title, source_value, shown, name), vertical, layout
+            )
             result = cut_segment(
                 str(src.path),
                 out_path,
@@ -121,11 +125,13 @@ def run_pipeline(args: Any, cfg: Config) -> list[ClipResult]:
             touch(src.path)
 
 
-def _planned(slug: str, seg: Segment, out_dir: Path, fast: bool, index: int, total: int) -> ClipResult:
+def _planned(
+    title: str | None, source: str, seg: Segment, out_dir: Path, fast: bool
+) -> ClipResult:
     return ClipResult(
         source="dry-run",
         segment=seg,
-        output_path=out_dir / output_filename(slug, seg),
+        output_path=out_dir / clip_filename(title, source, seg),
         duration=seg.duration,
         mode="fast" if fast else "accurate",
         size_bytes=0,

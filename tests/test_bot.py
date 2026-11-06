@@ -309,7 +309,7 @@ class TestFastButton:
         handle_callback(bot, _cfg(tmp_path), self._callback())
         assert len(bot.videos) == 1
         assert "fast" in bot.videos[0][2]
-        assert bot.videos[0][1].name.endswith("_fast.mp4")
+        assert bot.videos[0][1].name.endswith("-fast.mp4")
         assert any("Готово" in text for _, text in bot.messages)
 
     def test_recut_without_job(self, tmp_path):

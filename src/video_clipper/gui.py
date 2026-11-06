@@ -21,7 +21,7 @@ from urllib.parse import unquote, urlparse
 from .config import Config, load_config
 from .cut import ClipResult
 from .probe import EnvironmentProblem, check_tools
-from .segments import Segment, output_filename, source_slug, validate_segments
+from .segments import Segment, clip_filename, validate_segments
 from .source import is_url
 
 log = logging.getLogger("video_clipper")
@@ -245,7 +245,6 @@ def default_clipper(
         validate_segments(segments, duration=src.info.duration or None)
         out_dir = Path(cfg.output_dir).expanduser()
         out_dir.mkdir(parents=True, exist_ok=True)
-        slug = source_slug(source)
         results = []
         for i, seg in enumerate(segments):
             shown = original_segments[i] if i < len(original_segments) else seg
@@ -253,7 +252,8 @@ def default_clipper(
                 progress(f"Нарезка {shown.label}")
             result = cut_segment(
                 str(src.path),
-                out_dir / vertical_name(output_filename(slug, shown), vertical, layout),
+                out_dir
+                / vertical_name(clip_filename(src.title, source, shown), vertical, layout),
                 seg,
                 fast=fast,
                 ffmpeg_path=cfg.ffmpeg_path,

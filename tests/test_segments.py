@@ -9,9 +9,12 @@ from video_clipper.segments import (
     build_segments,
     load_csv,
     load_json,
+    clip_filename,
     output_filename,
     parse_range_spec,
+    source_ref,
     source_slug,
+    span_timecode,
     validate_segments,
 )
 
@@ -156,3 +159,61 @@ class TestNames:
 
     def test_source_slug_cyrillic(self):
         assert source_slug("/tmp/Отпуск 2026.mp4") == "otpusk_2026"
+
+
+class TestClipFilename:
+    TITLE = "ПЛАН ГЛОБАЛИСТОВ ДО 2030 ГОДА: ДЕНЬГИ, ВОЙНЫ, ИИ. Денис Смык"
+    URL = "https://www.youtube.com/watch?v=3UYFbmZwVes"
+
+    def test_title_source_and_span(self):
+        seg = Segment(29 * 60, 31 * 60 + 59)
+        assert clip_filename(self.TITLE, self.URL, seg) == (
+            "ПЛАН ГЛОБАЛИСТОВ ДО 2030 ГОДА ДЕНЬГИ, ВОЙНЫ, ИИ. Денис Смык"
+            " - youtube.com-3UYFbmZwVes - [29:00-31:59].mp4"
+        )
+
+    def test_span_over_hour_keeps_hours(self):
+        seg = Segment(3600 + 29 * 60, 3600 + 31 * 60 + 59)
+        assert span_timecode(seg.start) == "1:29:00"
+        assert "[1:29:00-1:31:59]" in clip_filename("T", self.URL, seg)
+
+    def test_whole_video_span(self):
+        assert clip_filename("Ролик", self.URL, Segment(0, 61), span="весь ролик") == (
+            "Ролик - youtube.com-3UYFbmZwVes - [весь ролик].mp4"
+        )
+
+    def test_missing_title_falls_back_to_source(self):
+        assert clip_filename(None, "https://youtu.be/dQw4w9WgXcQ", Segment(0, 5)) == (
+            "youtu.be-dQw4w9WgXcQ - [00:00-00:05].mp4"
+        )
+
+    def test_local_file_named_like_title_drops_reference(self):
+        assert clip_filename("Отпуск 2026", "/home/alex/Videos/Отпуск 2026.mp4", Segment(10, 20)) == (
+            "Отпуск 2026 - [00:10-00:20].mp4"
+        )
+
+    def test_other_local_file_keeps_reference(self):
+        assert clip_filename("Монтаж", "/home/alex/Videos/Отпуск 2026.mp4", Segment(10, 20)) == (
+            "Монтаж - Отпуск 2026.mp4 - [00:10-00:20].mp4"
+        )
+
+    def test_suffix_marks_variant(self):
+        assert clip_filename("Ролик", self.URL, Segment(0, 5), suffix="-fast") == (
+            "Ролик - youtube.com-3UYFbmZwVes - [00:00-00:05]-fast.mp4"
+        )
+
+    def test_explicit_name_wins(self):
+        assert clip_filename("Ролик", self.URL, Segment(0, 5), name="intro") == "intro.mp4"
+
+    def test_forbidden_characters_removed(self):
+        name = clip_filename('a/b:c\\d*e?f"g<h>i|j', self.URL, Segment(0, 5))
+        title_part = name.split(" - ")[0]
+        assert not set(title_part) & set('<>:"/\\|?*')
+
+    def test_emoji_dropped_from_title(self):
+        assert clip_filename("⚡️ПЛАН ГЛОБАЛИСТОВ", self.URL, Segment(0, 5)).startswith("ПЛАН ГЛОБАЛИСТОВ - ")
+
+    def test_source_ref_for_tiktok(self):
+        assert source_ref("https://www.tiktok.com/@user/video/7300000000000000000") == (
+            "tiktok.com-7300000000000000000"
+        )

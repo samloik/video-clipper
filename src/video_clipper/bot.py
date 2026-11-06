@@ -289,7 +289,7 @@ def clip_for_bot(
     "без перекодирования" button would have to download everything again.
     """
     from .cut import cut_segment, pick_vertical_size, vertical_name
-    from .segments import output_filename, source_slug, validate_segments
+    from .segments import clip_filename, validate_segments
     from .source import prepare_source, shift_segments
 
     src = prepare_source(source, cfg, segments=[(s.start, s.end) for s in segments], keep_source=True)
@@ -303,7 +303,6 @@ def clip_for_bot(
 
     out_dir = Path(cfg.output_dir).expanduser()
     out_dir.mkdir(parents=True, exist_ok=True)
-    slug = source_slug(source)
 
     if whole and not vertical:
         # Whole video, no re-encoding needed: remux, seconds even for long files.
@@ -311,7 +310,8 @@ def clip_for_bot(
 
         result = copy_whole(
             str(src.path),
-            out_dir / f"{slug}__full.mp4",
+            out_dir
+            / clip_filename(src.title, source, segments[0], span="весь ролик"),
             ffmpeg_path=cfg.ffmpeg_path,
             timeout=FFMPEG_TIMEOUT,
         )
@@ -325,6 +325,7 @@ def clip_for_bot(
             "shown": [{"start": 0.0, "end": segments[0].end}],
             "has_audio": src.info.has_audio,
             "source": source,
+            "title": src.title,
             "whole": True,
         }
 
@@ -333,7 +334,7 @@ def clip_for_bot(
         shown = segments[i] if i < len(segments) else seg
         result = cut_segment(
             str(src.path),
-            out_dir / vertical_name(output_filename(slug, shown), vertical, layout),
+            out_dir / vertical_name(clip_filename(src.title, source, shown), vertical, layout),
             seg,
             fast=fast,
             ffmpeg_path=cfg.ffmpeg_path,
@@ -357,6 +358,7 @@ def clip_for_bot(
         "shown": [{"start": s.start, "end": s.end} for s in segments],
         "has_audio": src.info.has_audio,
         "source": source,
+        "title": src.title,
     }
     return results, job
 
@@ -577,21 +579,24 @@ def handle_callback(bot, cfg: Config, callback: dict) -> None:
     bot.send_chat_action(chat_id, "record_video")
 
     from .cut import pick_vertical_size, vertical_name
-    from .segments import Segment, output_filename, source_slug
+    from .segments import Segment, clip_filename
 
     out_dir = Path(cfg.output_dir).expanduser()
-    slug = source_slug(job["source"])
     sent = 0
     for i, raw in enumerate(job["segments"]):
         seg = Segment(raw["start"], raw["end"])
         shown_raw = job["shown"][i] if i < len(job["shown"]) else raw
         shown = Segment(shown_raw["start"], shown_raw["end"])
-        base_name = f"{slug}_{shown.start:.0f}_{shown.end:.0f}" + ("" if vertical else "_fast")
         try:
             result = cut_segment(
                 str(source_path),
-                out_dir / vertical_name(
-                    output_filename(slug, shown, name=base_name), vertical, layout
+                out_dir
+                / vertical_name(
+                    clip_filename(
+                        job.get("title"), job["source"], shown, suffix="" if vertical else "-fast"
+                    ),
+                    vertical,
+                    layout,
                 ),
                 seg,
                 fast=fast,
