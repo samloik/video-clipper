@@ -183,6 +183,21 @@ class TestDownload:
         src = prepare_source("https://youtu.be/x", cfg, segments=[(0, 28)], downloader=fake_downloader)
         assert src.path == sample_video
 
+    def test_section_auth_error_does_not_fall_back_to_full_download(self, sample_video, tmp_path):
+        """A bot-check on the section must not start a multi-hundred-MB download."""
+        attempts = []
+
+        def downloader(url, opts):
+            attempts.append(opts)
+            if opts.get("skip_download"):
+                return {"duration": 152 * 60}
+            raise RuntimeError("Sign in to confirm you're not a bot")
+
+        cfg = load_config(None).with_overrides(cache_dir=tmp_path / "cache")
+        with pytest.raises(SourceError, match="Полную загрузку не начинаю"):
+            prepare_source("https://youtu.be/x", cfg, segments=[(0, 20)], downloader=downloader)
+        assert len(attempts) == 2  # metadata + the failed section attempt, no third try
+
     def test_download_failure_is_reported(self):
         def broken(url, opts):
             raise RuntimeError("boom")

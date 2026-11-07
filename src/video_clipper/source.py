@@ -226,6 +226,20 @@ def _download(
         except Exception as exc:
             if not sections:
                 raise
+            if _is_auth_error(exc):
+                # A bot-check will fail the full download too, and a long video
+                # means hundreds of megabytes before the error — stop right here.
+                raise SourceError(
+                    f"Секционная загрузка отклонена сайтом: {exc}.\n\n"
+                    f"Полную загрузку не начинаю — с этой блокировкой она тоже не пройдёт. "
+                    f"Обнови cookies ({cfg.cookies}) или попробуй позже."
+                ) from exc
+            if duration > LONG_VIDEO_SECONDS:
+                raise SourceError(
+                    f"Не удалось взять только участки ({exc}), а полная загрузка "
+                    f"{duration / 60:.0f}-минутного видео через этот прокси не пройдёт. "
+                    f"Повтори запрос позже или обнови cookies."
+                ) from exc
             log.warning("Секционная загрузка не удалась (%s) — качаю видео целиком", exc)
             _clear_partials(cfg.cache_dir)
             opts.pop("download_ranges", None)
@@ -314,6 +328,15 @@ def _with_cookie_hint(exc: Exception, cfg: Config) -> str:
             f"он не восстанавливает."
         )
     return message
+
+
+LONG_VIDEO_SECONDS = 90 * 60
+
+
+def _is_auth_error(exc: Exception) -> bool:
+    """Site asked for authentication / flagged the client as a bot."""
+    message = str(exc).lower()
+    return any(sign in message for sign in COOKIE_SIGNS)
 
 
 def _clear_partials(cache_dir: Path) -> None:
