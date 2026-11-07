@@ -446,6 +446,27 @@ class TestOpenEnd:
         assert seen["open_ends"] == [True]
 
 
+class TestFrameBudget:
+    """Кадр по ссылке не должен держать человека минутами."""
+
+    def test_server_stops_after_the_budget(self):
+        import video_clipper.gui as gui_module
+        from video_clipper import preview
+
+        assert preview.FRAME_TOTAL_BUDGET == 45.0
+        assert gui_module.FRAME_TOTAL_BUDGET == preview.FRAME_TOTAL_BUDGET
+        assert "time.monotonic() - began < FRAME_TOTAL_BUDGET" in open(
+            gui_module.__file__, encoding="utf-8"
+        ).read()
+
+    def test_page_gives_up_after_45_seconds(self):
+        from video_clipper.gui import PAGE
+
+        assert "setTimeout(() => {" in PAGE
+        assert "45000" in PAGE
+        assert "кадр не пришёл за 45 с" in PAGE
+
+
 class TestEtaWithoutEstimate:
     """Без готовой оценки остаток считается по фактическому прогрессу."""
 

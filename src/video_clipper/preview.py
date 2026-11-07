@@ -25,6 +25,10 @@ log = logging.getLogger(__name__)
 
 FRAME_TIMEOUT = 25
 STREAM_FRAME_TIMEOUT = 22  # один заход за кадром из потока; всего их два
+STREAM_FORMAT = "bv*[height<=480]/b[height<=480]/bv*/b"
+# Сколько всего ждём кадр по ссылке (поток + страховочный участок), секунды:
+# человек не должен смотреть на вертушку дольше минуты
+FRAME_TOTAL_BUDGET = 45.0
 STREAM_TTL = 600
 
 # Кадры кэшируем: при быстром перелистывании границы один и тот же кадр
@@ -236,7 +240,7 @@ def stream_info(source: str, cfg: Config) -> tuple[str, dict]:
         **base,
         "skip_download": True,
         # сначала видеодорожка, потом что угодно: для кадра звук не нужен
-        "format": "bv*[height<=480]/b[height<=480]/bv*/b",
+        "format": STREAM_FORMAT,
         "socket_timeout": 10,
     }
     # Один клиент за попытку. Перебор клиентов подряд злит YouTube: каждый лишний
@@ -244,16 +248,27 @@ def stream_info(source: str, cfg: Config) -> tuple[str, dict]:
     info: dict = {}
     last_error: Exception | None = None
     for index, client in enumerate(("android", "mweb")):
-        opts = dict(base)
-        opts["extractor_args"] = {"youtube": {"player_client": [client]}}
-        if index:
-            time.sleep(2)
-        try:
-            info = _ytdlp_extract(source, opts) or {}
-        except Exception as exc:  # noqa: BLE001 - причина уйдёт наверх
-            last_error = exc
-            log.info("Поток через %s не получен: %s", client, str(exc)[:120])
-            continue
+        # У части клиентов нет форматов ниже 480p — тогда просим «лучший доступный»,
+        # иначе yt-dlp отвечает «Requested format is not available» и кадра нет
+        for fmt in (STREAM_FORMAT, None):
+            opts = dict(base)
+            opts["extractor_args"] = {"youtube": {"player_client": [client]}}
+            if fmt:
+                opts["format"] = fmt
+            else:
+                opts.pop("format", None)
+            if index and fmt is STREAM_FORMAT:
+                time.sleep(2)
+            try:
+                info = _ytdlp_extract(source, opts) or {}
+            except Exception as exc:  # noqa: BLE001 - причина уйдёт наверх
+                last_error = exc
+                log.info("Поток через %s (%s) не получен: %s", client, fmt or "любой", str(exc)[:110])
+                if "Requested format is not available" in str(exc):
+                    continue
+                break
+            if info.get("url"):
+                break
         if info.get("url"):
             break
     if not info.get("url") and last_error is not None:

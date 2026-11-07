@@ -37,6 +37,7 @@ from .preview import (
     ensure_window,
     find_window,
     grab_frame,
+    FRAME_TOTAL_BUDGET,
     grab_stream_frame,
     link_problem,
     local_source,
@@ -1189,9 +1190,16 @@ async function loadFrame(img, tc, onMissing, noteEl) {
   const hideBusy = () => {
     if (warmup) { clearTimeout(warmup); warmup = null; }
     if (ticker) { clearInterval(ticker); ticker = null; }
+    if (deadline) { clearTimeout(deadline); deadline = null; }
     if (holder) holder.classList.remove('busy');
   };
+  let deadline = null;
   warmup = setTimeout(showBusy, 160);
+  // страховка на зависшее соединение: сервер укладывается в 45 с, но если ответ
+  // вообще не придёт, вертушка не должна крутиться минутами
+  deadline = setTimeout(() => {
+    if (fresh()) { hideBusy(); mark('· кадр не пришёл за 45 с'); }
+  }, 45000);
 
   try {
     const res = await fetch(frameUrl(tc));
@@ -2518,6 +2526,7 @@ def make_handler(
                         self._error(409, broken)
                         return
                     if source.startswith(("http://", "https://")):
+                        began = time.monotonic()
                         frame = cached_frame(source, wanted, frame_width)
                         reason = ""
                         approx = False
@@ -2533,8 +2542,10 @@ def make_handler(
                             )
                             return
                         # поток не дал кадр (медленный CDN): короткий участок качаем
-                        # сами, чтобы человеку не приходилось нажимать «скачать 20 с»
-                        frame = _frame_from_window(source, cfg, wanted, frame_width)
+                        # сами, чтобы человеку не приходилось нажимать «скачать 20 с».
+                        # Но не дольше общего бюджета: ждать кадр минутами нельзя.
+                        if time.monotonic() - began < FRAME_TOTAL_BUDGET:
+                            frame = _frame_from_window(source, cfg, wanted, frame_width)
                         if frame:
                             self._send(200, frame, "image/jpeg")
                             return

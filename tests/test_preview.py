@@ -174,26 +174,6 @@ class TestPreviewWindow:
         assert end <= 29.8 and start < end
 
 
-class TestLinkProblem:
-    def test_short_id_is_named_as_truncated(self):
-        from video_clipper.preview import link_problem
-
-        assert "10 символов" in link_problem("https://youtu.be/ABCDEFGHIJ")
-
-    def test_long_id_is_named_as_extra_character(self):
-        from video_clipper.preview import link_problem
-
-        problem = link_problem("https://www.youtube.com/shorts/KhPr0wIt81EA")
-        assert "12 символов" in problem
-        assert "приклеился лишний" in problem
-        assert "https://youtu.be/KhPr0wIt81E" in problem
-
-    def test_correct_id_passes(self):
-        from video_clipper.preview import link_problem
-
-        assert link_problem("https://www.youtube.com/watch?v=-QQSyL7tnqs") == ""
-
-
 class TestStream:
     """Кадр по ссылке без скачивания: берём прямую ссылку на поток."""
 
@@ -249,6 +229,24 @@ class TestStream:
         stream_info(url, cfg)
         assert cached_stream(url)["duration"] == 3458.0
 
+    def test_missing_small_format_falls_back_to_any(self, tmp_path, monkeypatch):
+        """«Requested format is not available» — не приговор: просим любой формат."""
+        import video_clipper.source as source_module
+
+        seen = []
+
+        def fake(url, opts):
+            seen.append(opts.get("format"))
+            if opts.get("format"):
+                raise RuntimeError("ERROR: [youtube] X: Requested format is not available")
+            return {"url": "https://cdn.example/any.mp4", "duration": 45.0,
+                    "width": 1080, "height": 1920, "fps": 30.0}
+
+        monkeypatch.setattr(source_module, "_ytdlp_extract", fake)
+        url, meta = stream_info("https://youtu.be/FMT1", self._cfg(tmp_path))
+        assert url == "https://cdn.example/any.mp4"
+        assert seen[0] is not None and seen[1] is None, "второй заход — без ограничения формата"
+
     def test_slow_cdn_gets_a_second_try_with_a_fresh_url(self, tmp_path, monkeypatch):
         """Медленный CDN — не приговор: второй заход берёт новый адрес потока."""
         import video_clipper.preview as pv
@@ -297,6 +295,13 @@ class TestLinkProblem:
 
     def test_other_sites_are_not_judged(self):
         assert link_problem("https://rutube.ru/video/abc/") == ""
+
+    def test_id_longer_than_eleven_is_named_as_extra_character(self):
+        # 12 символов: yt-dlp молча обрежет до 11 и ответит «video is unavailable»
+        problem = link_problem("https://www.youtube.com/shorts/KhPr0wIt81EA")
+        assert "12 символов" in problem
+        assert "приклеился лишний" in problem
+        assert "https://youtu.be/KhPr0wIt81E" in problem
 
 
 class TestFrameCache:
