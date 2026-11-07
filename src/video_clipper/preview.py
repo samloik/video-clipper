@@ -268,6 +268,14 @@ def stream_info(source: str, cfg: Config) -> tuple[str, dict]:
     return url, meta
 
 
+def cached_stream(source: str) -> dict:
+    """Метаданные потока, если их уже добыли (без обращения к сайту)."""
+    entry = _STREAM_CACHE.get(source)
+    if not entry or time.time() - entry[0] >= STREAM_TTL:
+        return {}
+    return dict(entry[2])
+
+
 def grab_stream_frame(source: str, cfg: Config, seconds: float, width: int = 480) -> bytes:
     """Кадр из потока: ffmpeg читает только нужный кусок через HTTP Range."""
     from .httpproxy import HttpBridge

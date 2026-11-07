@@ -32,6 +32,7 @@ from .cut import ClipResult, CutCancelled, clamp_horizontal
 from .probe import EnvironmentProblem, check_tools
 from .preview import (
     cached_frame,
+    cached_stream,
     closest_frame,
     ensure_window,
     find_window,
@@ -1672,20 +1673,27 @@ def _preview_error(exc: Exception) -> str:
 
 def _remote_media(source: str, cfg: Config) -> dict:
     """Что известно о ссылке до скачивания: длительность из метаданных сайта."""
-    duration = 0.0
+    duration, width, height, fps = 0.0, 0, 0, 0.0
     if source.startswith(("http://", "https://")):
         # только из кэша: запрос к сайту занимает секунды, страница ждать не должна
-        from .source import cached_metadata
+        stream = cached_stream(source)
+        if stream:
+            duration = float(stream.get("duration") or 0.0)
+            width = int(stream.get("width") or 0)
+            height = int(stream.get("height") or 0)
+            fps = float(stream.get("fps") or 0.0)
+        else:
+            from .source import cached_metadata
 
-        try:
-            duration = float(cached_metadata(source).get("duration") or 0.0)
-        except Exception:  # noqa: BLE001 - метаданные не критичны
-            duration = 0.0
+            try:
+                duration = float(cached_metadata(source).get("duration") or 0.0)
+            except Exception:  # noqa: BLE001 - метаданные не критичны
+                duration = 0.0
     return {
         "duration": round(duration, 3),
-        "width": 0,
-        "height": 0,
-        "fps": 0.0,
+        "width": width,
+        "height": height,
+        "fps": fps,
         "offset": 0.0,
         "needs_download": True,
         "stream": True,

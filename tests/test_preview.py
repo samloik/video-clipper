@@ -12,6 +12,7 @@ from video_clipper.config import load_config
 from video_clipper.preview import (
     FRAME_CACHE_LIMIT,
     cached_frame,
+    cached_stream,
     closest_frame,
     ensure_window,
     find_window,
@@ -211,6 +212,22 @@ class TestStream:
         stream_info("https://youtu.be/STREAM2", cfg)
         stream_info("https://youtu.be/STREAM2", cfg)
         assert len(calls) == 1
+
+    def test_cached_stream_metadata_is_reused(self, tmp_path, monkeypatch):
+        import video_clipper.source as source_module
+
+        monkeypatch.setattr(
+            source_module, "_ytdlp_extract",
+            lambda url, opts: {
+                "url": "https://cdn.example/z.mp4",
+                "duration": 3458.0, "width": 640, "height": 360, "fps": 25.0,
+            },
+        )
+        cfg = self._cfg(tmp_path)
+        url = "https://youtu.be/STREAM4"
+        assert cached_stream(url) == {}
+        stream_info(url, cfg)
+        assert cached_stream(url)["duration"] == 3458.0
 
     def test_missing_link_is_an_error(self, tmp_path, monkeypatch):
         import video_clipper.source as source_module
