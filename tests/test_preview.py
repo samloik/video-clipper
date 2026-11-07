@@ -144,16 +144,15 @@ class TestPreviewWindow:
 
         calls = {}
 
-        def fake_download(source, cfg_, start, end, out_dir, progress=None):
+        def fake_window(source, cfg_, start, end, out_dir):
             calls.update(source=source, start=start, end=end, out_dir=out_dir)
-            return downloaded, start
+            return downloaded, start, {"title": "ролик"}
 
+        import video_clipper.preview as preview_module
         import video_clipper.source as source_module
 
-        monkeypatch.setattr(source_module, "download_section", fake_download)
-        monkeypatch.setattr(
-            source_module, "fetch_metadata", lambda url, cfg_: {"duration": 600.0}
-        )
+        monkeypatch.setattr(source_module, "download_window", fake_window)
+        monkeypatch.setattr(preview_module, "cached_stream", lambda source: {"duration": 600.0})
         path, start, end = ensure_window(url, cfg, 300)
         assert calls["start"] == 298.0 and calls["end"] == 318.0
         assert path.parent == folder and path.name.endswith("-298.mp4")
@@ -165,13 +164,14 @@ class TestPreviewWindow:
         downloaded.parent.mkdir(parents=True, exist_ok=True)
         downloaded.write_bytes(b"y")
 
+        import video_clipper.preview as preview_module
         import video_clipper.source as source_module
 
         monkeypatch.setattr(
-            source_module, "download_section",
-            lambda source, cfg_, start, end, out_dir, progress=None: (downloaded, start),
+            source_module, "download_window",
+            lambda source, cfg_, start, end, out_dir: (downloaded, start, {}),
         )
-        monkeypatch.setattr(source_module, "fetch_metadata", lambda url, cfg_: {"duration": 30.0})
+        monkeypatch.setattr(preview_module, "cached_stream", lambda source: {"duration": 30.0})
         _, start, end = ensure_window("https://youtu.be/SHORT", cfg, 29)
         assert end <= 29.8 and start < end
 

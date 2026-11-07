@@ -1838,6 +1838,27 @@ def _reason_is_permanent(reason: str) -> bool:
     return any(sign in text for sign in PERMANENT_REASON_SIGNS)
 
 
+def _window_frame(source: str, cfg: Config, seconds: float, width: int):
+    """Кадр из короткого участка: скачиваем его один раз, дальше всё локально."""
+    try:
+        resolved = resolve_for_time(source, cfg, seconds)
+        if resolved is None:
+            ensure_window(source, cfg, seconds)
+            resolved = resolve_for_time(source, cfg, seconds)
+        if resolved is None:
+            return b"", ""
+        media, local_time = resolved[0], resolved[1]
+        if not _allowed_media(media, cfg):
+            return b"", ""
+        frame = grab_frame(media, local_time, width)
+        if frame:
+            return frame, ""
+        return b"", "кадр из участка не получился"
+    except Exception as exc:  # noqa: BLE001 - сеть, бот-чек, битый файл
+        log.info("Участок для кадров не получился: %s", str(exc)[:120])
+        return b"", _preview_error(exc)
+
+
 def _frame_from_window(source: str, cfg: Config, seconds: float, width: int) -> bytes:
     """Кадр из короткого скачанного участка — страховка, когда поток медленный."""
     try:
@@ -2647,6 +2668,11 @@ def make_handler(
                         reason = ""
                         approx = False
                         if not frame:
+                            # Сначала короткий участок: он скачивается один раз
+                            # (5–20 с) и дальше отдаёт кадры мгновенно. Поток по
+                            # каждому клику — лотерея с таймаутами на медленном CDN.
+                            frame, reason = _window_frame(source, cfg, wanted, frame_width)
+                        if not frame and not _reason_is_permanent(reason):
                             frame, reason = _stream_frame(source, cfg, wanted, frame_width)
                         if not frame:
                             frame = closest_frame(source, wanted, frame_width)
@@ -2656,15 +2682,6 @@ def make_handler(
                                 200, frame, "image/jpeg",
                                 {"X-Frame-Approx": "1"} if approx else None,
                             )
-                            return
-                        # поток не дал кадр (медленный CDN): короткий участок качаем
-                        # сами, чтобы человеку не приходилось нажимать «скачать 20 с».
-                        # Но не дольше общего бюджета: ждать кадр минутами нельзя.
-                        if (not _reason_is_permanent(reason)
-                                and time.monotonic() - began < FRAME_TOTAL_BUDGET):
-                            frame = _frame_from_window(source, cfg, wanted, frame_width)
-                        if frame:
-                            self._send(200, frame, "image/jpeg")
                             return
                         if reason:
                             self._error(409, reason)

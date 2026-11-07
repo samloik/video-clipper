@@ -182,13 +182,21 @@ def ensure_window(source: str, cfg: Config, seconds: float, until=None, progress
     if found is not None:
         if until is None or until <= found[2]:
             return found
-    from .source import download_section, fetch_metadata
+    # Один участок на источник: две рамки не должны качать его дважды.
+    with _window_lock(source):
+        found = find_window(source, cfg, seconds)
+        if found is not None and (until is None or until <= found[2]):
+            return found
+        return _download_window(source, cfg, seconds, until, progress)
 
-    duration = 0.0
-    try:
-        duration = float(fetch_metadata(source, cfg).get("duration") or 0.0)
-    except Exception as exc:  # метаданные не критичны: возьмём кусок вслепую
-        log.info("Длительность для предпросмотра неизвестна (%s)", exc)
+
+def _download_window(source: str, cfg: Config, seconds: float, until, progress=None):
+    """Скачать участок для кадров: сначала прямой Range, потом yt-dlp."""
+    from .source import download_window
+
+    # Длительность берём только из уже добытого — лишний поход в сеть здесь
+    # стоит десятки секунд, а окно и без неё качается нормально.
+    duration = float(cached_stream(source).get("duration") or 0.0)
     start = max(0.0, float(seconds) - PREVIEW_LEAD)
     span = PREVIEW_WINDOW
     if until is not None:
@@ -204,7 +212,23 @@ def ensure_window(source: str, cfg: Config, seconds: float, until=None, progress
             start, end = max(0.0, duration - PREVIEW_WINDOW), duration - 0.2
     folder = windows_dir(cfg)
     folder.mkdir(parents=True, exist_ok=True)
-    path, offset = download_section(source, cfg, start, end, folder, progress)
+
+    path = None
+    offset = start
+    length = 0.0
+    try:
+        # Прямой Range-запрос: на живом ролике 40 с видео — 5 с вместо минут
+        path, offset, _meta = download_window(source, cfg, start, end, folder)
+        length = float(probe_media(path).get("duration") or 0.0)
+    except Exception as exc:  # noqa: BLE001 - откат на yt-dlp-секции
+        log.info("Быстрый участок не вышел (%s) — тяну через yt-dlp", str(exc)[:120])
+        from .source import download_section
+
+        path, offset = download_section(source, cfg, start, end, folder, progress)
+        length = float(probe_media(path).get("duration") or 0.0)
+    if length <= 0:
+        # паспорт файла не прочитался — считаем, что участок дошёл до запрошенного конца
+        length = max(0.0, float(end) - float(offset))
     suffix = path.suffix or ".mp4"
     target = folder / f"{video_id_from_url(source) or 'clip'}-{int(offset)}{suffix}"
     try:
@@ -215,8 +239,8 @@ def ensure_window(source: str, cfg: Config, seconds: float, until=None, progress
     meta = {
         "source": source,
         "file": target.name,
-        "start": start,
-        "end": end,
+        "start": round(float(offset), 3),
+        "end": round(float(offset) + length, 3),
         "duration": round(duration, 3),
     }
     (folder / f"{target.stem}.json").write_text(
@@ -244,6 +268,16 @@ _STREAM_CACHE: dict[str, tuple[float, str, dict]] = {}
 _STREAM_LOCKS: dict[str, threading.Lock] = {}
 _STREAM_LOCKS_GUARD = threading.Lock()
 _REMOTE_FRAME_LOCK = threading.Lock()
+_WINDOW_LOCKS: dict[str, threading.Lock] = {}
+_WINDOW_LOCKS_GUARD = threading.Lock()
+
+
+def _window_lock(source: str) -> threading.Lock:
+    with _WINDOW_LOCKS_GUARD:
+        lock = _WINDOW_LOCKS.get(source)
+        if lock is None:
+            lock = _WINDOW_LOCKS[source] = threading.Lock()
+        return lock
 
 
 def _source_lock(source: str) -> threading.Lock:

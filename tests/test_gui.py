@@ -514,25 +514,25 @@ class TestPermanentReasons:
     REASON = ("видео недоступно: приватное, удалённое или ссылка неверна. "
               "Открой её в браузере")
 
-    def test_window_is_not_downloaded(self, server_factory, cfg, monkeypatch):
+    def test_stream_is_not_tried_after_a_permanent_reason(self, server_factory, cfg, monkeypatch):
         import video_clipper.gui as gui_module
 
-        calls = []
+        stream_calls = []
         monkeypatch.setattr(
             gui_module, "_remote_media",
             lambda source, cfg_: {"duration": 0.0, "needs_download": True, "window": False,
                                   "link_problem": ""},
         )
-        monkeypatch.setattr(gui_module, "_stream_frame", lambda *a: (b"", self.REASON))
-        monkeypatch.setattr(gui_module, "ensure_window",
-                            lambda *a, **k: calls.append(1))
+        monkeypatch.setattr(gui_module, "_window_frame", lambda *a: (b"", self.REASON))
+        monkeypatch.setattr(gui_module, "_stream_frame",
+                            lambda *a: (stream_calls.append(1), (b"", ""))[1])
         base = server_factory(fake_clipper(cfg.output_dir / "c.mp4"))
         status, body, _ = _get(
             base + "/api/frame?source=https://youtu.be/DEADVIDEO01&t=0"
         )
         assert status == 409
         assert "видео недоступно" in json.loads(body)["error"]
-        assert calls == [], "закрытое видео не повод качать участок"
+        assert stream_calls == [], "после «недоступно» поток не дёргаем"
 
     def test_permanent_signs(self):
         import video_clipper.gui as gui_module
@@ -578,9 +578,9 @@ class TestFrameBudget:
 
         assert preview.FRAME_TOTAL_BUDGET == 45.0
         assert gui_module.FRAME_TOTAL_BUDGET == preview.FRAME_TOTAL_BUDGET
-        assert "time.monotonic() - began < FRAME_TOTAL_BUDGET" in open(
-            gui_module.__file__, encoding="utf-8"
-        ).read()
+        source = open(gui_module.__file__, encoding="utf-8").read()
+        # кадр сначала берётся из короткого участка, поток — только если участок не вышел
+        assert "frame, reason = _window_frame(source, cfg, wanted, frame_width)" in source
 
     def test_page_gives_up_after_45_seconds(self):
         from video_clipper.gui import PAGE
@@ -769,15 +769,17 @@ class TestStreamFallback:
             lambda source, cfg_: {"duration": 63.0, "needs_download": True, "window": False,
                                   "link_problem": ""},
         )
+        stream_calls = []
+        monkeypatch.setattr(gui_module, "_window_frame",
+                            lambda source, cfg_, seconds, width: (b"\xff\xd8window", ""))
         monkeypatch.setattr(gui_module, "_stream_frame",
-                            lambda source, cfg_, seconds, width: (b"", "кадр из потока не пришёл вовремя"))
-        monkeypatch.setattr(gui_module, "_frame_from_window",
-                            lambda source, cfg_, seconds, width: b"\xff\xd8window")
+                            lambda *a: (stream_calls.append(1), (b"", ""))[1])
         base = server_factory(fake_clipper(cfg.cache_dir / "c.mp4"))
         status, body, headers = _get(base + "/api/frame?source=https://youtu.be/SSSSSSSSSSS&t=30")
         assert status == 200
         assert headers.get("Content-Type") == "image/jpeg"
         assert body == b"\xff\xd8window"
+        assert stream_calls == [], "если участок дал кадр, поток не нужен"
 
     def test_timeout_does_not_freeze_the_source(self, cfg, monkeypatch):
         import video_clipper.gui as gui_module
@@ -858,6 +860,7 @@ class TestPreviewForLinks:
             seen.update(seconds=seconds, width=width)
             return b"\xff\xd8\xff\xd9", ""
 
+        monkeypatch.setattr(gui_module, "_window_frame", lambda *a: (b"", ""))
         monkeypatch.setattr(gui_module, "_stream_frame", fake_stream)
         base = server_factory(fake_clipper(cfg.output_dir / "c.mp4"))
         status, body, headers = _get(
