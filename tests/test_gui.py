@@ -446,6 +446,15 @@ class TestOpenEnd:
         assert seen["open_ends"] == [True]
 
 
+class TestDeadLinkHidesDownload:
+    """По закрытому видео и битой ссылке кнопку «скачать 20 с» не предлагаем."""
+
+    def test_page_hides_the_button_for_permanent_reasons(self):
+        from video_clipper.gui import PAGE
+
+        assert "/обрезан|недоступн|символ/i.test(error)" in PAGE
+
+
 class TestUnavailableVideo:
     """«Видео недоступно» — это не таймаут: причину надо назвать сразу."""
 

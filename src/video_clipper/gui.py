@@ -1263,7 +1263,9 @@ function refreshThumbs() {
   const beyond = (seconds) => mediaInfo && mediaInfo.duration && !mediaInfo.window &&
     seconds > mediaInfo.duration + 0.05;
   const missing = (error) => {
-    if (error && /обрезан/i.test(error)) {
+    // если кадр не выйдет в принципе (видео закрыто, ссылка битая или скопирована
+    // с ошибкой), кнопка «скачать 20 с» только сбивает с толку
+    if (error && /обрезан|недоступн|символ/i.test(error)) {
       $('prep-frames').hidden = true;
       previewNoteEl.textContent = error;
       return;
