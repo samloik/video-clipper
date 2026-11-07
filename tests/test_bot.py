@@ -117,6 +117,46 @@ class TestSendPolicy:
         assert len(bot.videos) == 1
 
 
+class TestTimeCommand:
+    def _cfg(self, tmp_path):
+        cfg = _cfg(tmp_path)
+        cfg.config_path = tmp_path / "config.json"
+        return cfg
+
+    def test_time_shows_current_value(self, tmp_path):
+        cfg = self._cfg(tmp_path)
+        bot = FakeBot()
+        handle_message(bot, cfg, {"chat": {"id": 1}, "text": "/time"})
+        text = "\n".join(t for _, t in bot.messages)
+        assert "30 мин" in text and "/time 1:30" in text
+
+    def test_time_changes_retention_and_persists(self, tmp_path):
+        cfg = self._cfg(tmp_path)
+        bot = FakeBot()
+        handle_message(bot, cfg, {"chat": {"id": 1}, "text": "/time 1:30"})
+        assert cfg.retention_minutes == 90
+        assert "1 ч 30 мин" in "\n".join(t for _, t in bot.messages)
+        assert cfg.retention_file().read_text().strip() == "90"
+
+    def test_time_rejects_garbage(self, tmp_path):
+        cfg = self._cfg(tmp_path)
+        bot = FakeBot()
+        was = cfg.retention_minutes
+        handle_message(bot, cfg, {"chat": {"id": 1}, "text": "/time полчаса"})
+        assert cfg.retention_minutes == was
+        assert "Примеры" in "\n".join(t for _, t in bot.messages)
+
+    def test_status_shows_the_deletion_moment(self, tmp_path):
+        cfg = self._cfg(tmp_path)
+        cfg.cache_dir.mkdir(parents=True, exist_ok=True)
+        (cfg.cache_dir / "a.mp4").write_bytes(b"x" * 1024)
+        bot = FakeBot()
+        handle_message(bot, cfg, {"chat": {"id": 1}, "text": "/status"})
+        text = "\n".join(t for _, t in bot.messages)
+        assert "удалится" in text and " в " in text
+        assert "Хранение: 30 мин" in text
+
+
 class TestAttachment:
     def _message(self, **extra):
         message = {"chat": {"id": 1}, "caption": ""}

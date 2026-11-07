@@ -39,6 +39,7 @@ from .config import Config, load_config
 from .segments import Segment, parse_range_spec
 from .source import ChallengeCooldown, challenge_until, fetch_metadata, is_bot_check, is_url
 from .storage import describe, sweep
+from .timecode import format_moment, format_retention, human_duration, human_timecode
 
 log = logging.getLogger("video_clipper")
 
@@ -47,7 +48,7 @@ URL_RE = re.compile(r"https?://\S+")
 # Characters a timecode may consist of: digits and any of the component
 # separators the parser understands (":12" is a valid 0:12).
 _TC_CHARS_RE = re.compile(r"^[\d:\\/.,]+$")
-INFO_TEMPLATE = """Как присылать запрос
+INFO_TEMPLATE = r"""Как присылать запрос
 
 Ссылка и таймкоды в одном сообщении — в строку или с новой строки:
 https://youtu.be/ID 0:10-0:20
@@ -73,7 +74,8 @@ https://youtu.be/ID 0:10-0:20
 
 КОМАНДЫ
   /info     эта памятка
-  /status   что лежит на машине и сколько ему жить
+  /status   что лежит на машине, когда каждый файл удалится
+  /time     срок хранения: /time 1:30 — час тридцать (по умолчанию 30 минут)
   /stop     прервать текущую нарезку
   /resume   повторить последний запрос
   /new      забыть запрос и удалить файлы
@@ -94,7 +96,8 @@ https://youtu.be/ID 0:10-0:20
   Telegram принимает файлы до 50 МБ — больший клип бот режет на части без
   пересжатия (качество не меняется) и присылает их по очереди с пометкой «часть i/n».
   Режется один ролик за раз, следующие ждут в очереди.
-  Файлы живут retention_minutes (обычно 30 минут) после последнего использования.
+  Файлы живут {retention} после последнего использования; срок меняется командой
+  /time — например /time 45, /time 1:30 или /time 2ч.
   Если YouTube требует подтверждение (бот-чек), бот делает паузу и повторяет
   запрос сам через 15 минут — отменить повтор можно командой /stop."""
 
@@ -128,7 +131,11 @@ def build_info(cfg: Config) -> str:
         where = f"{password} (файла пока нет)"
     else:
         where = "не задан — GUI работает только с localhost"
-    return INFO_TEMPLATE.format(gui=gui_url(cfg), gui_password=where)
+    from .timecode import format_retention
+
+    return INFO_TEMPLATE.format(
+        gui=gui_url(cfg), gui_password=where, retention=format_retention(cfg.retention_minutes)
+    )
 
 
 HELP = (
@@ -147,6 +154,7 @@ HELP = (
     "/stop — остановить текущую нарезку, /resume — повторить последний запрос.\n"
     "Видео можно прислать файлом (до 20 МБ) — таймкоды пиши в подписи.\n"
     "/new — начать с чистого листа, /clean — только удалить файлы, /status — что на машине.\n"
+    "/time 1:30 — сколько хранить файлы (по умолчанию 30 мин).\n"
     f"Файлы удаляются автоматически через {{minutes}} мин тишины."
 )
 
@@ -831,7 +839,6 @@ class ProgressReporter:
         text = self.render(self._stage, self._fraction, self._detail)
         elapsed = time.monotonic() - self._started_at
         if elapsed >= self.heartbeat:
-            from .timecode import human_duration
 
             text += f" · уже {human_duration(elapsed)}"
         return text
@@ -995,11 +1002,15 @@ def handle_message(bot, cfg: Config, message: dict, clipper=None) -> None:
     if command == "/status":
         lines = []
         for label, directory in (("оригиналы", cfg.cache_dir), ("клипы", Path(cfg.output_dir))):
-            items = describe(directory)
+            items = describe(directory, cfg.retention_minutes)
             total = sum(item["size"] for item in items) / 1048576
             lines.append(f"{label}: {len(items)} файл(ов), {total:.1f} МБ")
             for item in items[:10]:
-                lines.append(f"  · {item['name']} ({item['age_minutes']} мин)")
+                delete_at = item.get("delete_at")
+                left_minutes = item.get("left_minutes")
+                when = format_moment(float(delete_at) if isinstance(delete_at, (int, float)) else 0.0)
+                left = float(left_minutes) if isinstance(left_minutes, (int, float)) else 0.0
+                lines.append(f"  · {item['name']} — удалится {when} (через {human_duration(left * 60)})")
         from .source import cookies_path
 
         cookies = cookies_path(cfg)
@@ -1011,8 +1022,42 @@ def handle_message(bot, cfg: Config, message: dict, clipper=None) -> None:
         if chat_id in RETRY_AT:
             when = time.strftime("%H:%M", time.localtime(RETRY_AT[chat_id]))
             lines.append(f"Отложен повтор запроса в {when} (держит бот-чек YouTube)")
-        lines.append(f"Удаление через {cfg.retention_minutes} мин тишины")
+        lines.append(
+            f"Хранение: {format_retention(cfg.retention_minutes)} тишины; меняется /time"
+        )
         bot.send_message(chat_id, "\n".join(lines))
+        return
+    if command == "/time":
+        from .timecode import parse_retention
+
+        argument = text[len(text.split()[0]) :].strip()
+        if not argument:
+            bot.send_message(
+                chat_id,
+                f"Храню файлы {format_retention(cfg.retention_minutes)} после последнего "
+                f"использования.\n"
+                f"Изменить: /time 45, /time 1:30, /time 2ч. Максимум 168 ч.",
+            )
+            return
+        try:
+            minutes = parse_retention(argument)
+        except ValueError as exc:
+            bot.send_message(
+                chat_id,
+                f"{exc}.\nПримеры: /time 45 — минут, /time 1:30 — час тридцать, /time 2ч.",
+            )
+            return
+        was = cfg.retention_minutes
+        try:
+            cfg.set_retention(minutes)
+        except OSError:
+            pass
+        bot.send_message(
+            chat_id,
+            f"Принял: храню файлы {format_retention(minutes)} после последнего "
+            f"использования (было {format_retention(was)}).\n"
+            f"Действует и для бота, и для веб-интерфейса.",
+        )
         return
     if command == "/stop":
         stop_current_job(bot, chat_id)
@@ -1087,7 +1132,6 @@ def handle_message(bot, cfg: Config, message: dict, clipper=None) -> None:
         over = [seg for seg in request.segments if seg.end > duration + 0.5]
         if over:
             seg = over[0]
-            from .timecode import human_duration, human_timecode
 
             name = f"«{title.strip()}»" if title.strip() else "ролик"
             bot.send_message(

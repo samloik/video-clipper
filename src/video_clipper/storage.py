@@ -103,19 +103,23 @@ def touch(path: Path) -> None:
         pass
 
 
-def describe(directory: Path) -> list[dict[str, object]]:
-    """Files currently kept in a directory (for /status in the bot)."""
+def describe(directory: Path, minutes: int | None = None) -> list[dict[str, object]]:
+    """Files currently kept in a directory, with a deletion deadline when asked."""
     if not directory.is_dir():
         return []
     items = []
+    now = time.time()
     for path in sorted(directory.rglob("*")):
         if path.is_file():
             stat = path.stat()
-            items.append(
-                {
-                    "name": path.name,
-                    "size": stat.st_size,
-                    "age_minutes": round((time.time() - stat.st_mtime) / 60, 1),
-                }
-            )
+            item: dict[str, object] = {
+                "name": path.name,
+                "size": stat.st_size,
+                "age_minutes": round((now - stat.st_mtime) / 60, 1),
+                "mtime": stat.st_mtime,
+            }
+            if minutes:
+                item["delete_at"] = stat.st_mtime + minutes * 60
+                item["left_minutes"] = max(0.0, round((item["delete_at"] - now) / 60, 1))
+            items.append(item)
     return items

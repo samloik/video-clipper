@@ -2,7 +2,14 @@
 
 import pytest
 
-from video_clipper.timecode import filename_timecode, format_timecode, parse_timecode
+from video_clipper.timecode import (
+    filename_timecode,
+    format_moment,
+    format_retention,
+    format_timecode,
+    parse_retention,
+    parse_timecode,
+)
 
 
 class TestParseTimecode:
@@ -111,3 +118,47 @@ class TestFilenameTimecode:
 
     def test_rounding_to_next_second(self):
         assert filename_timecode(59.9999) == "000100"
+
+
+class TestParseRetention:
+    def test_bare_number_is_minutes(self):
+        assert parse_retention("30") == 30
+        assert parse_retention("45") == 45
+
+    def test_hours_and_minutes(self):
+        assert parse_retention("1:30") == 90
+        assert parse_retention("0:30") == 30
+
+    def test_suffixes(self):
+        assert parse_retention("2ч") == 120
+        assert parse_retention("20 мин") == 20
+        assert parse_retention("1 час") == 60
+
+    def test_other_separators(self):
+        assert parse_retention("1/30") == 90
+        assert parse_retention("1.30") == 90
+
+    def test_zero_and_garbage_are_rejected(self):
+        with pytest.raises(ValueError):
+            parse_retention("0")
+        with pytest.raises(ValueError):
+            parse_retention("")
+        with pytest.raises(ValueError):
+            parse_retention("полчаса")
+
+    def test_too_long_is_rejected(self):
+        with pytest.raises(ValueError, match="максимум"):
+            parse_retention("200:00")
+
+
+class TestFormatRetention:
+    def test_minutes_only(self):
+        assert format_retention(30) == "30 мин"
+
+    def test_hours(self):
+        assert format_retention(90) == "1 ч 30 мин"
+        assert format_retention(120) == "2 ч"
+
+    def test_moment_has_date_and_time(self):
+        text = format_moment(1794048358)
+        assert text.count(".") == 1 and " в " in text

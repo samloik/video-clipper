@@ -8,5 +8,6 @@ output/
 cache/
 *.log
 config.json
+retention.txt
 cookies*.txt
 .pytest_cache/

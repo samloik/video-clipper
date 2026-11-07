@@ -19,11 +19,14 @@ from video_clipper.segments import Segment
 
 @pytest.fixture()
 def cfg(tmp_path):
-    return _clean_config().with_overrides(
+    conf = _clean_config().with_overrides(
         output_dir=tmp_path / "out",
         cache_dir=tmp_path / "cache",
         log_file=tmp_path / "log.txt",
+        gui_secret_file=tmp_path / "gui.secret",
     )
+    conf.config_path = tmp_path / "config.json"
+    return conf
 
 
 def _clean_config(**overrides):
@@ -80,10 +83,12 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 _opener = urllib.request.build_opener(_NoRedirect)
 
 
-def _get(url, cookie=None, method="GET", data=None):
+def _get(url, cookie=None, method="GET", data=None, headers=None):
     req = urllib.request.Request(url, method=method, data=data)
     if cookie:
         req.add_header("Cookie", cookie)
+    for name, value in (headers or {}).items():
+        req.add_header(name, value)
     try:
         with _opener.open(req, timeout=10) as resp:
             return resp.status, resp.read(), resp.headers
@@ -142,13 +147,48 @@ class TestAuth:
         status, body, _ = _get(base + "/api/health", cookie=cookie)
         assert status == 200
 
-    def test_cookie_does_not_survive_a_restart(self, auth_server):
+    def test_cookie_survives_a_restart_with_the_same_secret(self, auth_server):
         base = auth_server()
         _, _, headers = _get(base + "/login", method="POST", data=b"password=s3cret")
         cookie = headers["Set-Cookie"].split(";")[0]
         other = auth_server()
-        status, _, _ = _get(other + "/", cookie=cookie)
-        assert status == 303, "токен подписан секретом процесса — чужой не годится"
+        status, body, _ = _get(other + "/", cookie=cookie)
+        assert status == 200, "ключ сессий лежит на диске — «запомнить» переживает рестарт"
+
+    def test_cookie_signed_by_another_secret_is_rejected(self, cfg, tmp_path):
+        first = create_server(cfg, fake_clipper(tmp_path / "c.mp4"), host="0.0.0.0",
+                              port=0, password="s3cret")
+        second_cfg = cfg.with_overrides(gui_secret_file=tmp_path / "other.secret")
+        second = create_server(second_cfg, fake_clipper(tmp_path / "c.mp4"), host="0.0.0.0",
+                               port=0, password="s3cret")
+        servers = []
+        for httpd in (first, second):
+            threading.Thread(target=httpd.serve_forever, daemon=True).start()
+            servers.append(httpd)
+        try:
+            base1 = f"http://127.0.0.1:{first.server_address[1]}"
+            base2 = f"http://127.0.0.1:{second.server_address[1]}"
+            _, _, headers = _get(base1 + "/login", method="POST", data=b"password=s3cret")
+            cookie = headers["Set-Cookie"].split(";")[0]
+            status, _, _ = _get(base2 + "/", cookie=cookie)
+            assert status == 303, "чужая подпись не проходит"
+        finally:
+            for httpd in servers:
+                httpd.shutdown()
+                httpd.server_close()
+
+    def test_remember_me_sets_a_month_cookie(self, auth_server):
+        base = auth_server()
+        status, _, headers = _get(base + "/login", method="POST",
+                                  data=b"password=s3cret&remember=1")
+        assert status == 303
+        cookie = headers["Set-Cookie"]
+        assert "Max-Age=2592000" in cookie, "месяц = 30*24*3600"
+
+    def test_login_without_remember_is_a_session_cookie(self, auth_server):
+        base = auth_server()
+        _, _, headers = _get(base + "/login", method="POST", data=b"password=s3cret")
+        assert "Max-Age" not in headers["Set-Cookie"], "без галочки cookie живёт до закрытия"
 
     def test_brute_force_is_slowed_down(self, auth_server):
         base = auth_server()
@@ -277,6 +317,42 @@ class TestDownload:
         assert status == 200, payload
         assert payload == b"clip-bytes" * 100
         assert headers.get("Content-Length") == str(len(payload))
+
+
+class TestRetention:
+    def test_get_returns_current_value(self, server_factory, tmp_path):
+        base = server_factory(fake_clipper(tmp_path / "c.mp4"))
+        status, body = get(base, "/api/retention")
+        assert status == 200
+        data = json.loads(body)
+        assert data["minutes"] == 30 and data["human"] == "30 мин"
+
+    def test_post_changes_and_persists(self, server_factory, cfg, tmp_path):
+        base = server_factory(fake_clipper(tmp_path / "c.mp4"))
+        status, body, _ = _get(base + "/api/retention", method="POST",
+                               data=b'{"value": "1:30"}',
+                               headers={"Content-Type": "application/json"})
+        assert status == 200
+        assert json.loads(body)["minutes"] == 90
+        assert cfg.retention_minutes == 90
+        assert cfg.retention_file().read_text().strip() == "90"
+
+    def test_bad_value_is_rejected(self, server_factory, cfg, tmp_path):
+        base = server_factory(fake_clipper(tmp_path / "c.mp4"))
+        status, body, _ = _get(base + "/api/retention", method="POST",
+                               data=json.dumps({"value": "полчаса"}).encode(),
+                               headers={"Content-Type": "application/json"})
+        assert status == 400
+        assert cfg.retention_minutes == 30
+
+    def test_status_shows_when_files_die(self, server_factory, cfg, tmp_path):
+        cfg.cache_dir.mkdir(parents=True, exist_ok=True)
+        (cfg.cache_dir / "a.mp4").write_bytes(b"x" * 1024)
+        base = server_factory(fake_clipper(tmp_path / "c.mp4"))
+        status, body = get(base, "/api/status")
+        text = json.loads(body)["text"]
+        assert "удалится" in text and " в " in text
+        assert "Хранение" in text or "хранение" in text
 
 
 class TestServicePanel:

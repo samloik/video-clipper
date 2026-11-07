@@ -8,10 +8,13 @@ cookies file is only referenced by path.
 from __future__ import annotations
 
 import json
+import logging
 import os
 from dataclasses import dataclass, fields, replace
 from pathlib import Path
 from typing import Any
+
+log = logging.getLogger("video_clipper")
 
 DEFAULT_CONFIG_PATH = "config.json"
 
@@ -35,6 +38,8 @@ DEFAULTS: dict[str, Any] = {
     "gui_host": "127.0.0.1",
     # пароль GUI читается из файла, чтобы не держать его в конфиге
     "gui_password_file": None,
+    # ключ для cookie-сессий GUI: переживает перезапуск, иначе «запомнить» не работает
+    "gui_secret_file": "~/.hermes/video-clipper-gui.secret",
     "gui_port": 8766,
     "log_file": "./video-clipper.log",
 }
@@ -46,7 +51,7 @@ _ALIASES = {
 }
 
 
-@dataclass(frozen=True)
+@dataclass
 class Config:
     output_dir: Path
     cache_dir: Path
@@ -65,8 +70,30 @@ class Config:
     telegram_policy: str
     gui_host: str
     gui_password_file: Path | None
+    gui_secret_file: Path
     gui_port: int
     log_file: Path
+    # путь к config.json, чтобы рядом хранить сменные настройки (retention.txt)
+    config_path: Path | None = None
+
+    def retention_file(self) -> Path | None:
+        """Where a runtime override of retention_minutes lives."""
+        if self.config_path is None:
+            return None
+        return self.config_path.parent / "retention.txt"
+
+    def set_retention(self, minutes: int) -> None:
+        """Change retention for this process and remember it for the next start."""
+        minutes = int(minutes)
+        if minutes <= 0:
+            raise ValueError("время хранения должно быть больше нуля")
+        self.retention_minutes = minutes
+        path = self.retention_file()
+        if path is not None:
+            try:
+                path.write_text(f"{minutes}\n", encoding="utf-8")
+            except OSError:
+                log.warning("не смог записать %s — хранение %d мин только до перезапуска", path, minutes)
 
     def as_dict(self) -> dict[str, Any]:
         data = {}
@@ -112,6 +139,7 @@ def _from_mapping(data: dict[str, Any]) -> Config:
             if merged["gui_password_file"]
             else None
         ),
+        gui_secret_file=Path(str(merged["gui_secret_file"])).expanduser(),
         gui_port=int(merged["gui_port"]),
         log_file=Path(str(merged["log_file"])).expanduser(),
     )
@@ -125,5 +153,22 @@ def load_config(path: str | os.PathLike[str] | None = None) -> Config:
             data = json.load(f)
         if not isinstance(data, dict):
             raise ValueError(f"{candidate}: config must be a JSON object")
-        return _from_mapping(data)
-    return _from_mapping({})
+        cfg = _from_mapping(data)
+        cfg.config_path = candidate
+        _apply_retention_override(cfg)
+        return cfg
+    cfg = _from_mapping({})
+    return cfg
+
+
+def _apply_retention_override(cfg: Config) -> None:
+    """Retention set at runtime (``/time``, «Хранение» в GUI) wins over the file."""
+    path = cfg.retention_file()
+    if path is None or not path.is_file():
+        return
+    try:
+        minutes = int(path.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return
+    if minutes > 0:
+        cfg.retention_minutes = minutes

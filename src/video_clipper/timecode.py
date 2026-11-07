@@ -16,6 +16,7 @@ with a message that names the offending value.
 from __future__ import annotations
 
 import re
+import time
 
 # Every character people use instead of ":" in the chat.
 _SEPARATOR_RE = re.compile(r"[:\\/,.]")
@@ -136,6 +137,65 @@ def human_duration(seconds: float) -> str:
         return f"{minutes} мин" if secs == 0 else f"{minutes} мин {secs} с"
     hours, minutes = divmod(minutes, 60)
     return f"{hours} ч {minutes:02d} мин"
+
+
+RETENTION_MAX_MINUTES = 7 * 24 * 60  # неделя — дальше это уже не транзитный узел
+
+
+def parse_retention(text: str) -> int:
+    """How long to keep files, in minutes, from a short human spec.
+
+    ``30`` и ``30м`` — тридцать минут, ``1:30`` — час тридцать, ``2ч`` — два часа.
+    The bare number means minutes here (not seconds): retention lives on a scale
+    of tens of minutes, and ``/time 30`` must mean the default, not half a minute.
+    """
+    raw = str(text or "").strip().lower().replace("ё", "е")
+    if not raw:
+        raise ValueError("не указано время хранения")
+    hours = minutes = 0
+    m = re.fullmatch(r"(\d+)\s*(ч|час[а-я]*|h|hour[s]?)", raw)
+    if m:
+        hours = int(m.group(1))
+    else:
+        m = re.fullmatch(r"(\d+)\s*(м|мин[а-я]*|m|min[s]?)", raw)
+        if m:
+            minutes = int(m.group(1))
+    if hours or minutes:
+        total = hours * 60 + minutes
+    else:
+        parts = [p for p in re.split(r"[:\-,./\\]", raw) if p != ""]
+        if not parts or len(parts) > 3:
+            raise ValueError(f"не понял время хранения: {text!r}")
+        try:
+            nums = [int(p) for p in parts]
+        except ValueError as exc:
+            raise ValueError(f"не понял время хранения: {text!r}") from exc
+        if len(parts) == 1:
+            total = nums[0]
+        elif len(parts) == 2:
+            total = nums[0] * 60 + nums[1]
+        else:
+            total = nums[0] * 60 + nums[1] + nums[2] / 60
+            total = int(round(total))
+    if total <= 0:
+        raise ValueError("время хранения должно быть больше нуля")
+    if total > RETENTION_MAX_MINUTES:
+        raise ValueError(f"слишком долго: максимум {RETENTION_MAX_MINUTES // 60} ч")
+    return int(total)
+
+
+def format_retention(minutes: int) -> str:
+    """``30 мин``, ``1 ч 30 мин``, ``2 ч``."""
+    minutes = int(minutes)
+    if minutes < 60:
+        return f"{minutes} мин"
+    hours, rest = divmod(minutes, 60)
+    return f"{hours} ч" if rest == 0 else f"{hours} ч {rest:02d} мин"
+
+
+def format_moment(timestamp: float) -> str:
+    """Local wall clock as ``07.11 в 18:42``."""
+    return time.strftime("%d.%m в %H:%M", time.localtime(timestamp))
 
 
 def filename_timecode(seconds: float) -> str:

@@ -37,6 +37,7 @@ ESTIMATE_LOCAL_OVERHEAD = 4.0
 ESTIMATE_URL_OVERHEAD = 15.0
 SESSION_COOKIE = "vc_session"
 SESSION_MAX_AGE = 12 * 3600
+SESSION_REMEMBER_AGE = 30 * 24 * 3600  # «запомнить меня на месяц»
 LOGIN_WINDOW = 600.0
 LOGIN_ATTEMPTS = 6
 
@@ -69,6 +70,9 @@ button{margin-top:14px;width:100%;padding:12px;border:0;border-radius:9px;
 button:hover{filter:brightness(1.06)}
 .err{color:var(--err);font-size:13px;margin:0 0 14px}
 .foot{margin-top:18px;color:var(--ink-3);font-size:12px;font-family:var(--mono)}
+.check{display:flex;align-items:center;gap:9px;margin:16px 0 0;font-size:13px;
+  letter-spacing:0;text-transform:none;color:var(--ink-2);cursor:pointer;min-height:32px}
+.check input{width:18px;height:18px;accent-color:var(--accent);padding:0;flex:none}
 </style>
 </head>
 <body>
@@ -78,8 +82,9 @@ button:hover{filter:brightness(1.06)}
   {error}
   <label for="pw">пароль</label>
   <input id="pw" type="password" name="password" autofocus autocomplete="current-password">
+  <label class="check"><input type="checkbox" name="remember" value="1"> запомнить меня на месяц</label>
   <button type="submit">Войти</button>
-  <div class="foot">сессия — 12 часов</div>
+  <div class="foot">без галочки — 12 часов, с галочкой — 30 дней</div>
 </form>
 </body></html>"""
 
@@ -87,22 +92,55 @@ button:hover{filter:brightness(1.06)}
 class Auth:
     """Password gate for the GUI, with a lightweight brute-force brake.
 
-    The session cookie is an HMAC of a per-process random secret, so restarting
-    the server invalidates every session — which is the behaviour we want.
+    A cookie carries its own expiry, signed with a secret kept on disk, so a
+    «запомнить на месяц» session survives a restart of the service. Without the
+    checkbox the cookie is a browser-session one and dies with the token.
     """
 
-    def __init__(self, password: str | None):
+    def __init__(self, password: str | None, secret_file: Path | None = None):
         self.password = (password or "").strip()
         self.enabled = bool(self.password)
-        self._secret = secrets.token_bytes(32)
+        self._secret = self._load_secret(secret_file)
         self._attempts: dict[str, list[float]] = {}
         self._lock = threading.Lock()
 
-    def token(self) -> str:
-        return hmac.new(self._secret, b"session", hashlib.sha256).hexdigest()
+    @staticmethod
+    def _load_secret(path: Path | None) -> bytes:
+        if path is not None:
+            try:
+                data = path.read_bytes().strip()
+            except OSError:
+                data = b""
+            if len(data) >= 32:
+                return data
+        secret = secrets.token_bytes(32)
+        if path is not None:
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(secret + b"\n")
+                os.chmod(path, 0o600)
+            except OSError:
+                log.warning("не смог сохранить ключ сессий в %s", path)
+        return secret
+
+    def token(self, ttl: float = SESSION_MAX_AGE) -> str:
+        expiry = int(time.time() + ttl)
+        return f"{expiry}.{self._sign(expiry)}"
+
+    def _sign(self, expiry: int) -> str:
+        return hmac.new(self._secret, f"session:{expiry}".encode(), hashlib.sha256).hexdigest()
 
     def check_cookie(self, value: str | None) -> bool:
-        return bool(value) and hmac.compare_digest(value, self.token())
+        if not value:
+            return False
+        expiry_raw, _, signature = value.partition(".")
+        try:
+            expiry = int(expiry_raw)
+        except ValueError:
+            return False
+        if expiry < time.time():
+            return False
+        return hmac.compare_digest(signature, self._sign(expiry))
 
     def check_password(self, candidate: str) -> bool:
         return self.enabled and hmac.compare_digest(candidate, self.password)
@@ -180,6 +218,9 @@ body{background:var(--bg);color:var(--ink);font:15px/1.5 var(--sans);
 .modal-box h3{margin:0 0 8px;font-size:15.5px;font-weight:600;letter-spacing:-.01em}
 .modal-box p{margin:0 0 18px;color:var(--ink-2);font-size:13.5px;line-height:1.55}
 .modal-actions{display:flex;justify-content:flex-end;gap:9px}
+.modal-box input{margin-bottom:8px}
+.modal-box .hint{margin:0 0 16px}
+.modal-actions .primary{width:auto;padding:9px 15px;font-size:13px;min-height:38px}
 .danger{background:#e0574a;color:#180b08;border:1px solid transparent;border-radius:8px;
   padding:9px 14px;font-size:13px;font-weight:600;cursor:pointer;min-height:38px}
 .danger:hover{filter:brightness(1.07)}
@@ -336,6 +377,7 @@ input::placeholder{color:#78818e}
     <span class="chip mono" id="svc"><i></i><span id="svc-text">проверяю связь</span></span>
     <button class="ghost" id="btn-status" type="button">Статус</button>
     <button class="ghost" id="btn-info" type="button">Справка</button>
+    <button class="ghost" id="btn-keep" type="button">Хранение</button>
     <button class="ghost" id="btn-clean" type="button">Очистить</button>
   </div>
 </header>
@@ -347,6 +389,20 @@ input::placeholder{color:#78818e}
     <div class="modal-actions">
       <button class="ghost" id="confirm-no" type="button">Отмена</button>
       <button class="danger" id="confirm-yes" type="button">Удалить</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal" id="prompt" hidden>
+  <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="prompt-title">
+    <h3 id="prompt-title">Хранение файлов</h3>
+    <p>Сколько держать скачанные оригиналы и готовые клипы после последнего использования?</p>
+    <input id="prompt-input" class="mono" type="text" value="30" inputmode="numeric"
+           aria-label="Время хранения" autocomplete="off">
+    <p class="hint" id="prompt-hint">30 — минут, 1:30 — час тридцать, 2ч — два часа.</p>
+    <div class="modal-actions">
+      <button class="ghost" id="prompt-no" type="button">Отмена</button>
+      <button class="primary prompt-ok" id="prompt-yes" type="button">Сохранить</button>
     </div>
   </div>
 </div>
@@ -535,6 +591,60 @@ document.addEventListener('keydown', (e) => {
   if (confirmEl.hidden) return;
   if (e.key === 'Escape') { e.preventDefault(); closeConfirm(false); }
   if (e.key === 'Enter') { e.preventDefault(); closeConfirm(true); }
+});
+
+const promptEl = $('prompt'), promptInput = $('prompt-input'), promptHint = $('prompt-hint');
+let promptResolve = null;
+
+function askPrompt(title, value, message) {
+  $('prompt-title').textContent = title;
+  promptInput.value = value;
+  promptHint.textContent = message || '30 — минут, 1:30 — час тридцать, 2ч — два часа.';
+  promptHint.style.color = message ? 'var(--err)' : '';
+  promptEl.hidden = false;
+  promptInput.focus();
+  promptInput.select();
+  return new Promise(resolve => { promptResolve = resolve; });
+}
+function closePrompt(value) {
+  promptEl.hidden = true;
+  const resolve = promptResolve;
+  promptResolve = null;
+  if (resolve) resolve(value);
+}
+$('prompt-no').addEventListener('click', () => closePrompt(null));
+$('prompt-yes').addEventListener('click', () => closePrompt(promptInput.value.trim()));
+promptEl.addEventListener('click', (e) => { if (e.target === promptEl) closePrompt(null); });
+promptInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); closePrompt(promptInput.value.trim()); }
+});
+document.addEventListener('keydown', (e) => {
+  if (promptEl.hidden) return;
+  if (e.key === 'Escape') { e.preventDefault(); closePrompt(null); }
+});
+
+$('btn-keep').addEventListener('click', async () => {
+  let current = 30, message = '';
+  try {
+    const info = await (await fetch('/api/retention')).json();
+    current = info.minutes || 30;
+  } catch (err) { /* остаётся значение по умолчанию */ }
+  for (;;) {
+    const value = await askPrompt('Хранение файлов', String(current), message);
+    if (value === null || value === '') return;
+    try {
+      const res = await fetch('/api/retention', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ value })
+      });
+      const data = await res.json();
+      if (!res.ok) { message = data.error || 'не понял значение'; continue; }
+      showPanel('Хранение', data.text);
+      return;
+    } catch (err) {
+      message = 'нет связи: ' + err.message;
+    }
+  }
 });
 
 $('btn-clean').addEventListener('click', async () => {
@@ -958,16 +1068,21 @@ def attachment_header(name: str) -> str:
 
 
 def status_text(cfg: Config) -> str:
-    """Что лежит на машине — тот же ответ, что /status у бота."""
+    """Что лежит на машине и когда каждый файл исчезнет."""
     from .storage import describe
+    from .timecode import format_moment, format_retention, human_duration
 
+    minutes = cfg.retention_minutes
     lines = []
     for label, directory in (("оригиналы", cfg.cache_dir), ("клипы", cfg.output_dir)):
-        items = describe(Path(directory))
+        items = describe(Path(directory), minutes)
         total = sum(item["size"] for item in items) / 1048576
         lines.append(f"{label}: {len(items)} файл(ов), {total:.1f} МБ")
         for item in items[:8]:
-            lines.append(f"  · {item['name']} — {item['age_minutes']} мин")
+            deadline = float(item.get("delete_at") or 0)  # type: ignore[arg-type]
+            left = float(item.get("left_minutes") or 0)  # type: ignore[arg-type]
+            when = format_moment(deadline) if deadline else "?"
+            lines.append(f"  · {item['name']} — удалится {when} (через {human_duration(left * 60)})")
     cookies = Path(cfg.cookies).expanduser() if cfg.cookies else None
     if cookies and cookies.is_file():
         age = (time.time() - cookies.stat().st_mtime) / 86400
@@ -976,7 +1091,9 @@ def status_text(cfg: Config) -> str:
         lines.append("cookies: файла нет — YouTube может требовать авторизацию")
     running = sum(1 for job in JOBS.values() if job.get("state") == "running")
     lines.append(f"в работе: {running} задание(й)")
-    lines.append(f"хранение: {cfg.retention_minutes} мин тишины")
+    lines.append(
+        f"хранение: {format_retention(minutes)} тишины — меняется кнопкой «Хранение»"
+    )
     lines.append(f"слушаю: {cfg.gui_host}:{cfg.gui_port}")
     return "\n".join(lines)
 
@@ -1001,8 +1118,10 @@ GUI_HELP = """Как пользоваться
      Источник 720p остаётся 720×1280 — без апскейла и мыла.
 
 Хранение
-  Файл до {max_upload} ГБ. Скачанные оригиналы и готовые клипы живут {minutes} мин после
-  последнего использования и потом удаляются сами. «Очистить» в шапке удаляет сразу.
+  Файл до {max_upload} ГБ. Скачанные оригиналы и готовые клипы живут {retention} после
+  последнего использования и потом удаляются сами. «Статус» показывает точное время
+  удаления каждого файла, «Хранение» меняет срок (30 — минут, 1:30 — час тридцать, 2ч),
+  «Очистить» удаляет всё сразу.
 
 Служебное
   Адрес: {url}
@@ -1021,9 +1140,11 @@ def info_text(cfg: Config) -> str:
         where = "не задан — вход только с localhost"
     from .bot import gui_url
 
+    from .timecode import format_retention
+
     return GUI_HELP.format(
         max_upload=round(MAX_UPLOAD / 1024**3),
-        minutes=cfg.retention_minutes,
+        retention=format_retention(cfg.retention_minutes),
         url=gui_url(cfg),
         password=where,
     )
@@ -1082,21 +1203,23 @@ def make_handler(
                 self._login_page("слишком много попыток — подождите несколько минут", 429)
                 return
             try:
-                password = (parse_qs(body.decode("utf-8", "ignore")).get("password") or [""])[0]
+                form = parse_qs(body.decode("utf-8", "ignore"))
             except Exception:  # noqa: BLE001
-                password = ""
+                form = {}
+            password = (form.get("password") or [""])[0]
+            remember = (form.get("remember") or [""])[0] in ("1", "on", "true", "yes")
             if not auth_gate.check_password(password):
                 auth_gate.note_failure(client)
                 log.warning("GUI: неверный пароль с %s", client)
                 self._login_page("неверный пароль", 401)
                 return
             auth_gate.clear(client)
+            ttl = SESSION_REMEMBER_AGE if remember else SESSION_MAX_AGE
+            cookie = f"{SESSION_COOKIE}={auth_gate.token(ttl)}; Path=/; HttpOnly; SameSite=Lax"
+            if remember:
+                cookie += f"; Max-Age={ttl}"
             self.send_response(303)
-            self.send_header(
-                "Set-Cookie",
-                f"{SESSION_COOKIE}={auth_gate.token()}; Path=/; HttpOnly; SameSite=Lax; "
-                f"Max-Age={SESSION_MAX_AGE}",
-            )
+            self.send_header("Set-Cookie", cookie)
             self.send_header("Location", "/")
             self.send_header("Content-Length", "0")
             self.end_headers()
@@ -1166,6 +1289,19 @@ def make_handler(
             if path == "/api/status":
                 self._send(200, _dumps({"text": status_text(cfg)}))
                 return
+            if path == "/api/retention":
+                from .timecode import format_retention
+
+                self._send(
+                    200,
+                    _dumps(
+                        {
+                            "minutes": cfg.retention_minutes,
+                            "human": format_retention(cfg.retention_minutes),
+                        }
+                    ),
+                )
+                return
             if path == "/api/info":
                 self._send(200, _dumps({"text": info_text(cfg)}))
                 return
@@ -1225,6 +1361,30 @@ def make_handler(
                 self._error(413, "файл слишком большой")
                 return
             body = self.rfile.read(length) if length else b""
+
+            if parsed.path == "/api/retention":
+                from .timecode import format_retention, parse_retention
+
+                try:
+                    data = json.loads(body or b"{}")
+                    minutes = parse_retention(str(data.get("value") or data.get("minutes") or ""))
+                except (json.JSONDecodeError, ValueError) as exc:
+                    self._error(400, str(exc))
+                    return
+                was = cfg.retention_minutes
+                cfg.set_retention(minutes)
+                log.info("GUI: хранение %d мин → %d мин", was, minutes)
+                self._send(
+                    200,
+                    _dumps(
+                        {
+                            "minutes": minutes,
+                            "text": f"Храню файлы {format_retention(minutes)} после последнего "
+                            f"использования (было {format_retention(was)}).",
+                        }
+                    ),
+                )
+                return
 
             if parsed.path == "/api/clean":
                 self._send(200, _dumps({"text": clean_text(cfg)}))
@@ -1319,7 +1479,9 @@ def create_server(
             f"GUI на {bind_host} без пароля запрещён. Создай файл с паролем и укажи его "
             f"в конфиге: gui_password_file, либо задай VIDEO_CLIPPER_GUI_PASSWORD."
         )
-    httpd = ThreadingHTTPServer((bind_host, bind_port), make_handler(cfg, clipper, Auth(password)))
+    httpd = ThreadingHTTPServer(
+        (bind_host, bind_port), make_handler(cfg, clipper, Auth(password, cfg.gui_secret_file))
+    )
     httpd.daemon_threads = True
     return httpd
 
