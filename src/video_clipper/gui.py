@@ -167,6 +167,18 @@ body{background:var(--bg);color:var(--ink);font:15px/1.5 var(--sans);
 .progress.indeterminate i{width:35%;animation:slide 1.2s ease-in-out infinite}
 @keyframes slide{0%{margin-left:-35%}100%{margin-left:100%}}
 @media (prefers-reduced-motion:reduce){.progress.indeterminate i{animation:none;width:100%}}
+.modal{position:fixed;inset:0;background:#05070acc;backdrop-filter:blur(2px);
+  display:flex;align-items:center;justify-content:center;padding:20px;z-index:20}
+.modal[hidden]{display:none}
+.modal-box{background:var(--panel);border:1px solid var(--line);border-radius:calc(var(--r) + 2px);
+  width:min(400px,100%);padding:20px 22px 18px;box-shadow:0 24px 60px #000a}
+.modal-box h3{margin:0 0 8px;font-size:15.5px;font-weight:600;letter-spacing:-.01em}
+.modal-box p{margin:0 0 18px;color:var(--ink-2);font-size:13.5px;line-height:1.55}
+.modal-actions{display:flex;justify-content:flex-end;gap:9px}
+.danger{background:#e0574a;color:#180b08;border:1px solid transparent;border-radius:8px;
+  padding:9px 14px;font-size:13px;font-weight:600;cursor:pointer;min-height:38px}
+.danger:hover{filter:brightness(1.07)}
+.danger:focus-visible,.modal .ghost:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 
 .grid{display:grid;grid-template-columns:minmax(320px,420px) minmax(0,1fr);
       min-height:0;overflow:hidden}
@@ -321,6 +333,17 @@ input::placeholder{color:#78818e}
   </div>
 </header>
 
+<div class="modal" id="confirm" hidden>
+  <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
+    <h3 id="confirm-title">Очистить всё?</h3>
+    <p id="confirm-text">Все скачанные оригиналы и готовые клипы будут удалены. Отменить это нельзя.</p>
+    <div class="modal-actions">
+      <button class="ghost" id="confirm-no" type="button">Отмена</button>
+      <button class="danger" id="confirm-yes" type="button">Удалить</button>
+    </div>
+  </div>
+</div>
+
 <main class="grid">
   <section class="col-form">
     <div>
@@ -447,8 +470,36 @@ async function openPanel(url, title, method) {
 }
 $('btn-status').addEventListener('click', () => openPanel('/api/status', 'Статус'));
 $('btn-info').addEventListener('click', () => openPanel('/api/info', 'Справка'));
+const confirmEl = $('confirm');
+let confirmResolve = null;
+
+function askConfirm(title, text, okLabel) {
+  if (title) $('confirm-title').textContent = title;
+  if (text) $('confirm-text').textContent = text;
+  $('confirm-yes').textContent = okLabel || 'Удалить';
+  confirmEl.hidden = false;
+  $('confirm-no').focus();
+  return new Promise(resolve => { confirmResolve = resolve; });
+}
+function closeConfirm(answer) {
+  confirmEl.hidden = true;
+  const resolve = confirmResolve;
+  confirmResolve = null;
+  if (resolve) resolve(answer);
+}
+$('confirm-yes').addEventListener('click', () => closeConfirm(true));
+$('confirm-no').addEventListener('click', () => closeConfirm(false));
+confirmEl.addEventListener('click', (e) => { if (e.target === confirmEl) closeConfirm(false); });
+document.addEventListener('keydown', (e) => {
+  if (confirmEl.hidden) return;
+  if (e.key === 'Escape') { e.preventDefault(); closeConfirm(false); }
+  if (e.key === 'Enter') { e.preventDefault(); closeConfirm(true); }
+});
+
 $('btn-clean').addEventListener('click', async () => {
-  if (!confirm('Удалить все скачанные файлы и готовые клипы с этой машины?')) return;
+  if (!(await askConfirm('Очистить всё?',
+      'Все скачанные оригиналы и готовые клипы будут удалены. Отменить это нельзя.',
+      'Удалить'))) return;
   showPanel('Очистка', 'Удаляю…');
   try {
     const res = await fetch('/api/clean', { method: 'POST' });

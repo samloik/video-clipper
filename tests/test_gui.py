@@ -229,6 +229,14 @@ class TestPageAndHealth:
             httpd.server_close()
 
 
+    def test_confirm_dialog_is_styled_not_a_browser_popup(self):
+        from video_clipper.gui import PAGE
+
+        assert 'id="confirm"' in PAGE and 'modal-box' in PAGE
+        assert 'window.confirm' not in PAGE and 'confirm(' not in PAGE.replace('askConfirm(', '')
+        assert 'askConfirm(' in PAGE, "очистка должна спрашивать свой диалог"
+
+
 class TestServicePanel:
     def test_panel_lives_in_the_result_column(self):
         from video_clipper.gui import PAGE
