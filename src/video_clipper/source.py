@@ -49,6 +49,15 @@ class Source:
     offset: float = 0.0
     kind: str = "full"
 
+    @property
+    def absolute_duration(self) -> float:
+        """Length of the whole video, even when only a section was downloaded.
+
+        ``info.duration`` of a section download is the *section* length; «до конца»
+        must resolve to the end of the original video, not of the fragment.
+        """
+        return round(self.offset + self.info.duration, 3)
+
     def cleanup(self) -> None:
         """Remove the downloaded file and an empty cache directory."""
         if not self.is_temporary:
@@ -201,6 +210,22 @@ def prepare_source(
 
 
 SECTION_COVERAGE = 0.4
+
+
+def resolve_open_ends_after_download(
+    segments: list[Segment], src: "Source"
+) -> list[Segment]:
+    """Fill ``START-*`` ends from the downloaded source.
+
+    Uses the *absolute* duration: a section download only knows the length of the
+    fragment, and resolving to it silently cut clips short.
+    """
+    from .segments import has_open_ends, resolve_open_ends
+
+    if not has_open_ends(segments):
+        return segments
+    b = src.absolute_duration
+    return resolve_open_ends(segments, b or src.info.duration)
 
 
 def resolve_open_ends_for_source(

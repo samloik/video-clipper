@@ -13,6 +13,7 @@ from video_clipper.config import load_config
 from video_clipper.segments import Segment, is_open_end, parse_range_spec
 from video_clipper.source import (
     YT_CLIENTS,
+    resolve_open_ends_after_download,
     resolve_open_ends_for_source,
     ChallengeCooldown,
     Source,
@@ -439,3 +440,37 @@ class TestResolveOpenEnds:
         monkeypatch.setattr("video_clipper.source.fetch_metadata", boom)
         segs = [parse_range_spec("0-10")]
         assert resolve_open_ends_for_source(segs, "https://youtu.be/x", cfg) == segs
+
+
+class TestSectionDuration:
+    """Регрессия: клип «11-*» обрезался по длине скачанного фрагмента, а не ролика."""
+
+    def _section_source(self, offset: float, length: float) -> Source:
+        from video_clipper.probe import MediaInfo
+
+        return Source(
+            path=Path("/tmp/section.mp4"),
+            title="section",
+            is_temporary=True,
+            info=MediaInfo(duration=length, has_video=True, has_audio=True),
+            offset=offset,
+            kind="section",
+        )
+
+    def test_absolute_duration_adds_the_offset(self):
+        src = self._section_source(offset=11.0, length=17.2)
+        assert src.absolute_duration == pytest.approx(28.2)
+
+    def test_full_source_has_no_offset(self):
+        src = self._section_source(offset=0.0, length=28.2)
+        assert src.absolute_duration == pytest.approx(28.2)
+
+    def test_open_end_resolves_to_the_end_of_the_original_video(self):
+        src = self._section_source(offset=11.0, length=17.2)
+        resolved = resolve_open_ends_after_download([parse_range_spec("11-*")], src)
+        assert resolved[0].end == pytest.approx(28.2), "конец — конец ролика, а не фрагмента"
+
+    def test_closed_segments_are_left_alone(self):
+        src = self._section_source(offset=11.0, length=17.2)
+        segments = [parse_range_spec("11-20")]
+        assert resolve_open_ends_after_download(segments, src) == segments

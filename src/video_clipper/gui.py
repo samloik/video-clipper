@@ -1264,8 +1264,9 @@ def default_clipper(
         progress=report,
     )
     try:
-        if has_open_ends(segments):
-            segments = resolve_open_ends(segments, src.info.duration)
+        from .source import resolve_open_ends_after_download
+
+        segments = resolve_open_ends_after_download(segments, src)
         original_segments = segments
         segments = shift_segments(segments, src.offset)
         validate_segments(segments, duration=src.info.duration or None)

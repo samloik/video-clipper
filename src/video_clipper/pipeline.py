@@ -23,7 +23,13 @@ from .segments import (
     clip_filename,
     validate_segments,
 )
-from .source import is_url, prepare_source, resolve_open_ends_for_source, shift_segments
+from .source import (
+    is_url,
+    prepare_source,
+    resolve_open_ends_after_download,
+    resolve_open_ends_for_source,
+    shift_segments,
+)
 from .storage import sweep, touch
 
 log = logging.getLogger("video_clipper")
@@ -70,8 +76,7 @@ def run_pipeline(args: Any, cfg: Config) -> list[ClipResult]:
         keep_source=keep_source,
     )
     try:
-        if segments and has_open_ends(segments):
-            segments = resolve_open_ends(segments, src.info.duration)
+        segments = resolve_open_ends_after_download(segments, src)
         if whole:
             # No ranges given: the request is the entire video.
             if src.info.duration <= 0:

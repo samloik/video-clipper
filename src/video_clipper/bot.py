@@ -44,7 +44,14 @@ from .segments import (
     parse_range_spec,
     resolve_open_ends,
 )
-from .source import ChallengeCooldown, challenge_until, fetch_metadata, is_bot_check, is_url
+from .source import (
+    ChallengeCooldown,
+    challenge_until,
+    fetch_metadata,
+    is_bot_check,
+    is_url,
+    resolve_open_ends_after_download,
+)
 from .storage import describe, sweep
 from .timecode import format_moment, format_retention, human_duration, human_timecode
 
@@ -504,9 +511,7 @@ def clip_for_bot(
         cancel_event=STOP_REQUESTED,
         progress=progress,
     )
-    if has_open_ends(segments):
-        # «11-*» — теперь известна настоящая длительность скачанного файла
-        segments = resolve_open_ends(segments, src.info.duration)
+    segments = resolve_open_ends_after_download(segments, src)
     whole = not segments
     if whole:
         if src.info.duration <= 0:
