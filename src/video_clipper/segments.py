@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import json
+import math
 import re
 import unicodedata
 from dataclasses import dataclass
@@ -19,6 +20,14 @@ _TRANSLIT = {
     "ч": "ch", "ш": "sh", "щ": "sch", "ъ": "", "ы": "y", "ь": "", "э": "e", "ю": "yu",
     "я": "ya", "і": "i", "ї": "yi", "є": "ye", "ґ": "g",
 }
+
+
+# «до конца ролика»: конец узнаётся только после probe/metadata, до этого — inf
+OPEN_END: float = math.inf
+
+
+def is_open_end(seg: "Segment") -> bool:
+    return math.isinf(seg.end)
 
 
 @dataclass(frozen=True)
@@ -137,17 +146,24 @@ def clip_filename(
     return f"{stem}.mp4"
 
 
+OPEN_END_WORDS = {"*", "конец", "end", "до конца", "до конца ролика"}
+
+
 def parse_range_spec(spec: str) -> Segment:
     """Parse one range.
 
     ``START-END`` is a start and an end (``1:12-1:45``); ``START=LENGTH`` is a
     start and a duration measured from it (``1:12=0:30`` → 1:12–1:42).
+    ``START-*`` means "from start to the end of the video"; the real end is filled
+    in later, once the duration is known.
     """
     raw = spec.strip()
     for separator in ("=", "-"):
         if separator in raw:
             left, right = raw.split(separator, 1)
             start = parse_timecode(left)
+            if separator == "-" and (right.strip().lower() in OPEN_END_WORDS or not right.strip()):
+                return Segment(start, OPEN_END)
             value = parse_timecode(right)
             if separator == "=":
                 if value <= 0:
@@ -271,6 +287,8 @@ def validate_segments(
                 f"Отрезок {seg.label}: конец ({format_timecode(seg.end)}) должен быть больше начала "
                 f"({format_timecode(seg.start)})"
             )
+        if is_open_end(seg):
+            continue
         if duration and seg.end > duration + 1e-6:
             raise ValueError(
                 f"Отрезок {seg.label} выходит за длительность видео ({format_timecode(duration)})"
@@ -284,6 +302,20 @@ def validate_segments(
                     f"Отрезки пересекаются: {prev.label} и {cur.label} "
                     f"(разрешить можно флагом --allow-overlap)"
                 )
+
+
+def resolve_open_ends(segments: list[Segment], duration: float) -> list[Segment]:
+    """Fill in the real end for ``START-*`` segments once the duration is known."""
+    if duration <= 0:
+        raise ValueError("не удалось определить длительность ролика для «до конца»")
+    return [
+        Segment(seg.start, round(duration, 3), seg.name) if is_open_end(seg) else seg
+        for seg in segments
+    ]
+
+
+def has_open_ends(segments: list[Segment]) -> bool:
+    return any(is_open_end(seg) for seg in segments)
 
 
 def output_filename(slug: str, seg: Segment, name: str | None = None) -> str:

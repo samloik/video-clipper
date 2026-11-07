@@ -21,7 +21,7 @@ from video_clipper.bot import (
 )
 from video_clipper.config import load_config
 from video_clipper.cut import ClipResult
-from video_clipper.segments import Segment
+from video_clipper.segments import Segment, is_open_end
 from video_clipper.source import SourceError
 from video_clipper.storage import describe, find_cached_source, sweep, video_id_from_url
 
@@ -115,6 +115,43 @@ class TestSendPolicy:
         bot = FakeBot()
         botmod.send_video_smart(bot, 1, self._big_file(tmp_path), "подпись", policy="compress")
         assert len(bot.videos) == 1
+
+
+class TestOpenEnd:
+    def test_star_after_dash_means_to_the_end(self):
+        request = parse_request("https://youtu.be/ID 20-*")
+        assert request is not None
+        assert request.segments[0].start == 20.0
+        assert is_open_end(request.segments[0])
+
+    def test_star_is_understood_among_flags(self):
+        request = parse_request("https://youtu.be/ID вертикально 20-*")
+        assert request.vertical is True
+        assert is_open_end(request.segments[0])
+
+    def test_open_end_is_resolved_from_metadata_before_the_download(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(
+            "video_clipper.bot.fetch_metadata",
+            lambda source, cfg: {"duration": 42.0, "title": "ролик"},
+        )
+        seen = {}
+
+        def clipper(source, segments, fast, cfg, progress=None, vertical=False, layout="crop"):
+            seen["segments"] = [(s.start, s.end) for s in segments]
+            return []
+
+        bot = FakeBot()
+        bot.send_message = lambda chat, text, **kw: bot.messages.append((chat, text))
+        handle_message(
+            bot,
+            _cfg(tmp_path),
+            {"chat": {"id": 1}, "text": "https://youtu.be/ID 20-*"},
+            clipper=clipper,
+        )
+        assert seen["segments"] == [(20.0, 42.0)]
+        assert any("0:20" in text or "00:20" in text for _, text in bot.messages)
 
 
 class TestTimeCommand:

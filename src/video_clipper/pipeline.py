@@ -21,7 +21,7 @@ from .segments import (
     clip_filename,
     validate_segments,
 )
-from .source import is_url, prepare_source, shift_segments
+from .source import is_url, prepare_source, resolve_open_ends_for_source, shift_segments
 from .storage import sweep, touch
 
 log = logging.getLogger("video_clipper")
@@ -58,6 +58,9 @@ def run_pipeline(args: Any, cfg: Config) -> list[ClipResult]:
             log.info("dry-run: %s", res.output_path)
         return results
 
+    if segments:
+        # «20-*»: длительность узнаём до скачивания, иначе секции считаются от inf
+        segments = resolve_open_ends_for_source(segments, source_value, cfg)
     src = prepare_source(
         source_value,
         cfg,

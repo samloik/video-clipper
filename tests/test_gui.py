@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import threading
 import time
 import urllib.error
@@ -13,7 +14,7 @@ import pytest
 
 from video_clipper.config import load_config
 from video_clipper.cut import ClipResult
-from video_clipper.gui import create_server
+from video_clipper.gui import create_server, default_clipper
 from video_clipper.segments import Segment
 
 
@@ -319,6 +320,85 @@ class TestDownload:
         assert headers.get("Content-Length") == str(len(payload))
 
 
+@pytest.fixture()
+def ten_seconds(tmp_path) -> Path:
+    """Настоящий файл на 10 секунд: «до конца» проверяется на реальной длительности."""
+    if subprocess.run(["which", "ffmpeg"], capture_output=True).returncode != 0:
+        pytest.skip("нужен ffmpeg")
+    path = tmp_path / "ten.mp4"
+    subprocess.run(
+        [
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "lavfi", "-i", "testsrc=size=160x120:rate=25:duration=10",
+            "-f", "lavfi", "-i", "sine=frequency=440:duration=10",
+            "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-shortest", str(path),
+        ],
+        check=True,
+    )
+    return path
+
+
+class TestOpenEnd:
+    def test_api_accepts_star_as_the_end(self, server_factory, tmp_path, ten_seconds):
+        base = server_factory(default_clipper)
+        status, body = post_json(
+            base, "/api/clip",
+            {"source": str(ten_seconds), "start": "0:06", "end": "*"},
+        )
+        assert status == 202
+        job_id = body["job_id"]
+        for _ in range(120):
+            job = json.loads(get(base, f"/api/jobs/{job_id}")[1])
+            if job["state"] != "running":
+                break
+            time.sleep(0.1)
+        assert job["state"] == "done", job.get("error")
+        result = job["results"][0]
+        assert result["duration"] == pytest.approx(4.0, abs=0.4)
+        assert "00:10" in result["filename"], "конец должен стать длительностью файла"
+
+    def test_api_accepts_the_word_конец(self, server_factory, tmp_path, ten_seconds):
+        base = server_factory(default_clipper)
+        status, body = post_json(
+            base, "/api/clip",
+            {"source": str(ten_seconds), "start": "0:08", "end": "конец"},
+        )
+        assert status == 202
+
+    def test_bad_end_still_fails(self, server_factory, tmp_path):
+        base = server_factory(fake_clipper(tmp_path / "c.mp4"))
+        media = tmp_path / "v.mp4"
+        media.write_bytes(b"x")
+        status, body = post_json(
+            base, "/api/clip", {"source": str(media), "start": "0:00", "end": "abc"}
+        )
+        assert status == 400
+
+    def test_open_end_for_a_url_without_metadata_is_reported_in_the_job(
+        self, server_factory, cfg, tmp_path, monkeypatch
+    ):
+        from video_clipper.source import SourceError
+
+        def boom(*args, **kwargs):
+            raise SourceError("нет сети")
+
+        monkeypatch.setattr("video_clipper.source.fetch_metadata", boom)
+        base = server_factory(default_clipper)
+        status, body = post_json(
+            base, "/api/clip",
+            {"source": "https://youtu.be/ID", "start": "0:05", "end": "*"},
+        )
+        assert status == 202
+        for _ in range(50):
+            job = json.loads(get(base, f"/api/jobs/{body['job_id']}")[1])
+            if job["state"] != "running":
+                break
+            time.sleep(0.1)
+        assert job["state"] == "error"
+        assert "конец ролика" in job["error"]
+
+
 class TestRetention:
     def test_get_returns_current_value(self, server_factory, tmp_path):
         base = server_factory(fake_clipper(tmp_path / "c.mp4"))
@@ -344,6 +424,14 @@ class TestRetention:
                                headers={"Content-Type": "application/json"})
         assert status == 400
         assert cfg.retention_minutes == 30
+
+    def test_info_picks_up_retention_set_by_the_bot(self, server_factory, cfg, tmp_path):
+        base = server_factory(fake_clipper(tmp_path / "c.mp4"))
+        cfg.retention_file().write_text("120\n", encoding="utf-8")
+        status, body = get(base, "/api/info")
+        assert status == 200
+        assert "2 ч" in json.loads(body)["text"], "GUI должен видеть /time из бота"
+        assert cfg.retention_minutes == 120
 
     def test_status_shows_when_files_die(self, server_factory, cfg, tmp_path):
         cfg.cache_dir.mkdir(parents=True, exist_ok=True)

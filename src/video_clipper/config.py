@@ -161,8 +161,12 @@ def load_config(path: str | os.PathLike[str] | None = None) -> Config:
     return cfg
 
 
-def _apply_retention_override(cfg: Config) -> None:
-    """Retention set at runtime (``/time``, «Хранение» в GUI) wins over the file."""
+def apply_retention_override(cfg: Config) -> None:
+    """Re-read retention.txt so /time in the bot is visible in the GUI at once.
+
+    Cheap: one stat and a tiny read per request, and it keeps the two front-ends
+    from showing different values.
+    """
     path = cfg.retention_file()
     if path is None or not path.is_file():
         return
@@ -170,5 +174,9 @@ def _apply_retention_override(cfg: Config) -> None:
         minutes = int(path.read_text(encoding="utf-8").strip())
     except (OSError, ValueError):
         return
-    if minutes > 0:
+    if minutes > 0 and minutes != cfg.retention_minutes:
         cfg.retention_minutes = minutes
+
+
+# старое имя — для совместимости с кодом, который уже импортирует приватную версию
+_apply_retention_override = apply_retention_override

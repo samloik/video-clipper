@@ -23,10 +23,17 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import quote, unquote, urlparse
 
-from .config import Config, load_config
+from .config import Config, apply_retention_override, load_config
 from .cut import ClipResult
 from .probe import EnvironmentProblem, check_tools
-from .segments import Segment, clip_filename, validate_segments
+from .segments import (
+    OPEN_END,
+    OPEN_END_WORDS,
+    Segment,
+    clip_filename,
+    is_open_end,
+    validate_segments,
+)
 from .source import is_url
 
 log = logging.getLogger("video_clipper")
@@ -274,6 +281,7 @@ input::placeholder{color:#78818e}
   cursor:pointer;min-height:32px}
 .presets button:hover{border-color:var(--line-2);color:var(--ink)}
 .presets button.on{border-color:var(--accent);color:var(--accent);background:#e0a45814}
+.presets .to-end{border-color:#4a3a20;color:var(--accent)}
 .presets .reset{margin-left:auto;border-color:transparent;color:var(--ink-3);
   text-decoration:underline;text-underline-offset:3px;font-family:var(--sans)}
 .presets .reset:hover{color:var(--ink-2)}
@@ -432,9 +440,12 @@ input::placeholder{color:#78818e}
         <button type="button" data-len="30">30 с</button>
         <button type="button" data-len="60">1 мин</button>
         <button type="button" data-len="180">3 мин</button>
+        <button type="button" class="to-end" data-end="1">до конца</button>
         <button type="button" class="reset" data-reset="1">сброс</button>
       </div>
-      <p class="hint" style="margin-top:9px">Таймкоды: <b>45</b>, <b>1:12</b>, <b>0:00:10</b>.<br>Вместо «-» можно «=»: <b>1:00=0:30</b> — с 1:00 тридцать секунд.</p>
+      <p class="hint" style="margin-top:9px">Таймкоды: <b>45</b>, <b>1:12</b>, <b>0:00:10</b>.
+        Вместо «-» можно «=»: <b>1:00=0:30</b> — с 1:00 тридцать секунд.<br>
+        «до конца» или <b>*</b> во втором поле — от начала до конца ролика.</p>
     </div>
 
     <div class="modes">
@@ -769,7 +780,7 @@ async function upload(file) {
 
 const presetButtons = [...document.querySelectorAll('.presets button[data-len]')];
 function markPreset(len) {
-  presetButtons.forEach(b => b.classList.toggle('on', Number(b.dataset.len) === len));
+  presetButtons.forEach(b => b.classList.toggle('on', len !== null && Number(b.dataset.len) === len));
 }
 presetButtons.forEach(btn => {
   btn.addEventListener('click', () => {
@@ -782,9 +793,14 @@ presetButtons.forEach(btn => {
 document.querySelector('.presets .reset').addEventListener('click', () => {
   $('start').value = '0:00'; $('end').value = '0:30'; markPreset(30);
 });
+document.querySelector('.presets .to-end').addEventListener('click', () => {
+  $('end').value = '*';
+  markPreset(null);
+});
 function syncPreset() {
+  if ($('end').value.trim() === '*') { markPreset(null); return; }
   const len = Math.round(toSeconds($('end').value) - toSeconds($('start').value));
-  markPreset(len);
+  markPreset(Number.isFinite(len) ? len : null);
 }
 [$('start'), $('end')].forEach(el => el.addEventListener('input', syncPreset));
 syncPreset();
@@ -941,6 +957,18 @@ def _run_job(
     layout: str = "crop",
 ) -> None:
     try:
+        from .source import resolve_open_ends_for_source
+
+        try:
+            segments = resolve_open_ends_for_source(segments, source, cfg)
+        except Exception as exc:  # noqa: BLE001 — «до конца» без длительности
+            _job_update(
+                job_id,
+                state="error",
+                error=f"Не понял, где конец ролика: {exc}",
+                message="",
+            )
+            return
         estimate = _estimate(source, segments, fast, vertical, layout)
         _job_update(
             job_id,
@@ -1104,12 +1132,17 @@ GUI_HELP = """Как пользоваться
      от начала, «сброс» возвращает конец к началу ролика.
   3. Нажми «Нарезать» — справа появится клип, его можно скачать.
 
+До конца ролика
+  Кнопка «до конца» ставит в поле «конец» звёздочку: * — от начала до конца файла.
+  В таймкоде то же самое: 20-* — с двадцатой секунды до конца.
+
 Таймкоды
   45        — 45 секунд
   1:12      — 1 мин 12 с
   1:02:03   — 1 ч 2 мин 3 с
   Вместо «:» подойдёт , . / \\ — «1/12» это 1 мин 12 с.
   «1:00=0:30» — с 1:00 ровно тридцать секунд: после «=» не конец, а длительность.
+  «20-*» — с 20-й секунды до конца ролика.
 
 Режимы
   «без перекодирования» — режет по ключевому кадру: секунды вместо минут, зато начало
@@ -1264,6 +1297,7 @@ def make_handler(
             self._guard(self._handle_get)
 
         def _handle_get(self) -> None:
+            apply_retention_override(cfg)
             path = urlparse(self.path).path
             if path == "/api/health":
                 self._send(200, _dumps({"status": "ok"}))
@@ -1345,6 +1379,7 @@ def make_handler(
             self._guard(self._handle_post)
 
         def _handle_post(self) -> None:
+            apply_retention_override(cfg)
             parsed = urlparse(self.path)
             length = int(self.headers.get("Content-Length") or 0)
             if parsed.path == "/login" and length <= 4096:
@@ -1412,7 +1447,11 @@ def make_handler(
                     if not source:
                         raise ValueError("не указан файл или ссылка")
                     start = parse_timecode(data.get("start"))
-                    end = parse_timecode(data.get("end"))
+                    end_raw = str(data.get("end") or "").strip().lower()
+                    if end_raw in OPEN_END_WORDS:
+                        end = OPEN_END
+                    else:
+                        end = parse_timecode(data.get("end"))
                     segments = [Segment(start, end)]
                     validate_segments(segments, duration=None)
                     vertical = bool(data.get("vertical", False))

@@ -202,6 +202,22 @@ def prepare_source(
 SECTION_COVERAGE = 0.4
 
 
+def resolve_open_ends_for_source(
+    segments: list[Segment], source: str, cfg: Config
+) -> list[Segment]:
+    """Turn ``20-*`` into ``20-<duration>`` using metadata (URL) or ffprobe (file)."""
+    from .segments import has_open_ends, resolve_open_ends
+
+    if not has_open_ends(segments):
+        return segments
+    if is_url(source):
+        meta = fetch_metadata(cfg, source)
+        duration = float(meta.get("duration") or 0)
+    else:
+        duration = probe_media(str(Path(source).expanduser()), cfg.ffprobe_path).duration
+    return resolve_open_ends(segments, duration)
+
+
 def shift_segments(segments: list[Segment], offset: float) -> list[Segment]:
     """Map requested times onto a section file that starts at 0."""
     if not offset:

@@ -5,7 +5,9 @@ import json
 import pytest
 
 from video_clipper.segments import (
+    is_open_end,
     parse_ranges,
+    resolve_open_ends,
     Segment,
     build_segments,
     load_csv,
@@ -254,3 +256,44 @@ class TestClipFilename:
         assert source_ref("https://www.tiktok.com/@user/video/7300000000000000000") == (
             "tiktok.com-7300000000000000000"
         )
+
+
+class TestOpenEnd:
+    def test_star_means_to_the_end(self):
+        seg = parse_range_spec("20-*")
+        assert seg.start == 20.0
+        assert is_open_end(seg)
+
+    def test_empty_right_side_is_open_too(self):
+        seg = parse_range_spec("20-")
+        assert is_open_end(seg) and seg.start == 20.0
+
+    def test_word_конец_works(self):
+        assert is_open_end(parse_range_spec("20-конец"))
+
+    def test_open_end_is_not_an_error_without_duration(self):
+        validate_segments([parse_range_spec("20-*")], duration=None)
+
+    def test_open_end_is_not_rejected_by_duration(self):
+        validate_segments([parse_range_spec("20-*")], duration=30.0)
+
+    def test_resolve_fills_the_real_end(self):
+        resolved = resolve_open_ends([parse_range_spec("20-*")], 95.5)
+        assert resolved[0].end == 95.5 and not is_open_end(resolved[0])
+        assert resolved[0].duration == 75.5
+
+    def test_resolve_keeps_closed_segments(self):
+        closed = Segment(1, 2)
+        assert resolve_open_ends([closed], 100) == [closed]
+
+    def test_resolve_without_duration_is_an_error(self):
+        with pytest.raises(ValueError, match="длительность"):
+            resolve_open_ends([parse_range_spec("20-*")], 0)
+
+    def test_chain_with_open_end(self):
+        segs = parse_ranges("0:00-0:05; 20-*")
+        assert len(segs) == 2 and is_open_end(segs[1])
+
+    def test_equals_still_means_duration(self):
+        seg = parse_range_spec("20=5")
+        assert seg.end == 25.0 and not is_open_end(seg)

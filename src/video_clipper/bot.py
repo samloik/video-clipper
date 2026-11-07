@@ -35,8 +35,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from .config import Config, load_config
-from .segments import Segment, parse_range_spec
+from .config import Config, apply_retention_override, load_config
+from .segments import Segment, has_open_ends, parse_range_spec, resolve_open_ends
 from .source import ChallengeCooldown, challenge_until, fetch_metadata, is_bot_check, is_url
 from .storage import describe, sweep
 from .timecode import format_moment, format_retention, human_duration, human_timecode
@@ -63,6 +63,7 @@ https://youtu.be/ID 0:10-0:20
 
 ОТРЕЗКИ
   начало-конец   0:10-0:20          с 10-й по 20-ю секунду
+  до конца       0:20-*             с 20-й секунды до конца ролика («*» = конец)
   начало=длина   1:00=0:30          с 1:00 длиной 30 с, то есть 1:00–1:30
   несколько      ;  разделитель:  0:10-0:20; 2:00=45; 3:30-3:45
   можно и парой   0:10 0:20         два таймкода подряд — начало и конец
@@ -988,6 +989,7 @@ def handle_message(bot, cfg: Config, message: dict, clipper=None) -> None:
         log.warning("Отклонено сообщение от чужого chat_id: %s", chat_id)
         return
 
+    apply_retention_override(cfg)
     command = text.split()[0].lower() if text.startswith("/") else ""
     if command in {"/start", "/help"}:
         bot.send_message(chat_id, HELP.format(minutes=cfg.retention_minutes))
@@ -1128,6 +1130,21 @@ def handle_message(bot, cfg: Config, message: dict, clipper=None) -> None:
         meta = fetch_metadata(request.source, cfg)
     duration = float(meta.get("duration") or 0.0)
     title = str(meta.get("title") or "")
+    if request.segments and has_open_ends(request.segments):
+        # «20-*»: конец — конец ролика; для файла длительность даёт ffprobe
+        try:
+            if duration <= 0 and not is_url(request.source):
+                from .probe import probe_media
+
+                duration = probe_media(request.source, cfg.ffprobe_path).duration
+            request.segments = resolve_open_ends(request.segments, duration)
+        except (ValueError, OSError) as exc:
+            bot.send_message(
+                chat_id,
+                f"Не понял, где конец ролика: {exc}.\n"
+                f"Вместо «*» можно указать точный конец, например 0:10-1:30.",
+            )
+            return
     if duration and request.segments:
         over = [seg for seg in request.segments if seg.end > duration + 0.5]
         if over:
