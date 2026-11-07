@@ -19,6 +19,7 @@ from video_clipper.preview import (
     local_source,
     probe_media,
     remember_frame,
+    link_problem,
     resolve_for_time,
     stream_info,
     windows_dir,
@@ -213,6 +214,25 @@ class TestStream:
         monkeypatch.setattr(source_module, "_ytdlp_extract", lambda url, opts: {"title": "x"})
         with pytest.raises(RuntimeError, match="прямую ссылку"):
             stream_info("https://youtu.be/STREAM3", self._cfg(tmp_path))
+
+
+class TestLinkProblem:
+    """Обрезанная ссылка видна сразу, без похода в сеть."""
+
+    def test_ten_characters_instead_of_eleven(self):
+        message = link_problem("https://www.youtube.com/watch?v=-QQ5yL7tnq")
+        assert "10 символов" in message and "11" in message
+
+    def test_full_id_is_fine(self):
+        assert link_problem("https://www.youtube.com/watch?v=-PqDFgs4C2s") == ""
+
+    def test_shorts_and_short_links_are_checked(self):
+        assert link_problem("https://www.youtube.com/shorts/abc") != ""
+        assert link_problem("https://youtu.be/abc") != ""
+        assert link_problem("https://youtu.be/-PqDFgs4C2s") == ""
+
+    def test_other_sites_are_not_judged(self):
+        assert link_problem("https://rutube.ru/video/abc/") == ""
 
 
 class TestFrameCache:

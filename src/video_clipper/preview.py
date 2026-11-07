@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import subprocess
 import threading
 import time
@@ -87,6 +88,35 @@ def local_source(source: str, cfg: Config) -> Path | None:
             Path(cfg.cache_dir).expanduser(), source, cfg.retention_minutes
         )
     return None
+
+
+_LINK_ID_RE = {
+    "youtu.be": re.compile(r"youtu\.be/([A-Za-z0-9_-]+)"),
+    "watch": re.compile(r"[?&]v=([A-Za-z0-9_-]+)"),
+    "shorts": re.compile(r"/(?:shorts|embed|live)/([A-Za-z0-9_-]+)"),
+}
+
+
+def link_problem(source: str) -> str:
+    """Ссылка, которая заведомо не сработает — чтобы не ходить за кадром впустую.
+
+    YouTube-идентификатор всегда 11 символов: если в ссылке 10, она скопирована
+    не целиком, и ни метаданные, ни кадр не придут.
+    """
+    if not source or "youtu" not in source:
+        return ""
+    for pattern in _LINK_ID_RE.values():
+        match = pattern.search(source)
+        if not match:
+            continue
+        found = match.group(1)
+        if len(found) != 11:
+            return (
+                f"в ссылке {len(found)} символов id вместо 11 — она скопирована не целиком. "
+                "Скопируй адрес заново: https://youtu.be/XXXXXXXXXXX"
+            )
+        return ""
+    return ""
 
 
 def windows_dir(cfg: Config) -> Path:

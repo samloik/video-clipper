@@ -37,6 +37,7 @@ from .preview import (
     find_window,
     grab_frame,
     grab_stream_frame,
+    link_problem,
     local_source,
     probe_media,
     resolve_for_time,
@@ -1091,7 +1092,7 @@ async function loadFrame(img, tc, onMissing, noteEl) {
     if (!res.ok) {
       const data = await res.json().catch(() => ({}));
       // старый кадр не стираем, но и молчать нельзя: подписываем, что он устарел
-      mark('· кадр не обновился');
+      mark('· кадр не получен');
       if (onMissing) onMissing(data.error || '');
       return;
     }
@@ -1108,7 +1109,7 @@ async function loadFrame(img, tc, onMissing, noteEl) {
     };
     mark(res.headers.get('X-Frame-Approx') ? '· ближайший кадр' : '');
   } catch (err) {
-    mark('· кадр не обновился');
+    mark('· кадр не получен');
     if (onMissing) onMissing('');
   }
 }
@@ -1173,6 +1174,17 @@ async function loadMedia() {
     }
     mediaInfo = data;
     previewEl.hidden = false;
+    if (data.link_problem) {
+      // заведомо битая ссылка: не дёргаем сервер и говорим прямо
+      previewNoteEl.textContent = data.link_problem;
+      $('prep-frames').hidden = true;
+      $('play-seg').disabled = true;
+      $('thumb-start').removeAttribute('src');
+      $('thumb-end').removeAttribute('src');
+      $('note-start').textContent = '';
+      $('note-end').textContent = '';
+      return;
+    }
     $('play-seg').disabled = !!data.needs_download;
     $('play-seg').title = data.needs_download
       ? 'проигрывание доступно после первой нарезки: файл останется в кэше'
@@ -1593,13 +1605,23 @@ def auto_horizontal(source: str, cfg: Config) -> tuple[float, str]:
     return position, f"содержимое {width}px с {left}px → окно {position * 100:.0f}%"
 
 
+# Сайт отказывает не мгновенно: после бот-чека бессмысленно долбить его каждым кадром.
+_STREAM_COOLDOWN: dict[str, tuple[float, str]] = {}
+STREAM_COOLDOWN_SECONDS = 60.0
+
+
 def _stream_frame(source: str, cfg: Config, seconds: float, width: int):
     """Кадр из прямого потока и причина, если он не вышел."""
+    until, message = _STREAM_COOLDOWN.get(source, (0.0, ""))
+    if time.time() < until:
+        return b"", message
     try:
         return grab_stream_frame(source, cfg, seconds, width), ""
     except Exception as exc:  # noqa: BLE001 - сеть, бот-чек, битая ссылка
         log.info("Кадр из потока не получился: %s", exc)
-        return b"", _preview_error(exc)
+        message = _preview_error(exc)
+        _STREAM_COOLDOWN[source] = (time.time() + STREAM_COOLDOWN_SECONDS, message)
+        return b"", message
 
 
 def _preview_error(exc: Exception) -> str:
@@ -1635,6 +1657,7 @@ def _remote_media(source: str, cfg: Config) -> dict:
         "needs_download": True,
         "stream": True,
         "window": False,
+        "link_problem": link_problem(source),
     }
 
 
@@ -2335,7 +2358,13 @@ def make_handler(
                 if resolved is None:
                     if path == "/api/media":
                         # ссылка: кадры можно взять прямо из потока, файл не нужен
-                        self._send(200, _dumps(_remote_media(source, cfg)))
+                        info = _remote_media(source, cfg)
+                        info["link_problem"] = link_problem(source)
+                        self._send(200, _dumps(info))
+                        return
+                    broken = link_problem(source)
+                    if broken:
+                        self._error(409, broken)
                         return
                     if source.startswith(("http://", "https://")):
                         frame = cached_frame(source, wanted, frame_width)

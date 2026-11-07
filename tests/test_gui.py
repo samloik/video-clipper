@@ -600,6 +600,39 @@ class TestPreviewForLinks:
         assert body[:2] == b"\xff\xd8"
         assert seen == {"seconds": 7.5, "width": 320}
 
+    def test_truncated_link_is_refused_without_hitting_the_network(self, server_factory, cfg, monkeypatch):
+        import video_clipper.gui as gui_module
+
+        def angry(*args, **kwargs):
+            raise AssertionError("сеть не нужна: ссылка заведомо битая")
+
+        monkeypatch.setattr(gui_module, "_stream_frame", angry)
+        base = server_factory(fake_clipper(cfg.output_dir / "c.mp4"))
+        short = "https://www.youtube.com/watch?v=-Q5yL7tnq"
+        media_status, media_body, _ = _get(base + "/api/media?source=" + quote(short, safe=""))
+        data = json.loads(media_body)
+        assert media_status == 200 and "9 символов id вместо 11" in data["link_problem"]
+
+        status, body, _ = _get(base + "/api/frame?source=" + quote(short, safe="") + "&t=0")
+        assert status == 409 and "9 символов id вместо 11" in json.loads(body)["error"]
+
+    def test_stream_failure_is_remembered_for_a_minute(self, server_factory, cfg, monkeypatch):
+        import video_clipper.gui as gui_module
+
+        calls = []
+
+        def failing(*args, **kwargs):
+            calls.append(args)
+            raise RuntimeError("ERROR: [youtube] Sign in to confirm you're not a bot")
+
+        monkeypatch.setattr(gui_module, "grab_stream_frame", failing)
+        monkeypatch.setattr(gui_module, "_STREAM_COOLDOWN", {})
+        base = server_factory(fake_clipper(cfg.output_dir / "c.mp4"))
+        url = base + "/api/frame?source=" + quote("https://rutube.ru/video/тест/", safe="")
+        for _ in range(3):
+            _get(url + "&t=1")
+        assert len(calls) == 1, "после первой неудачи сайт не дёргаем минуту"
+
     def test_truncated_link_is_named_as_such(self, server_factory, cfg, monkeypatch):
         import video_clipper.gui as gui_module
 
