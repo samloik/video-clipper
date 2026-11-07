@@ -278,6 +278,62 @@ def clear_meta_cache():
     source_module.clear_challenge()
 
 
+class TestWindowDownload:
+    """Участок берём прямо из потока (ffmpeg + Range), а не через yt-dlp-секции."""
+
+    def test_compact_segments_make_one_window(self):
+        from video_clipper.source import _window_is_compact
+
+        assert _window_is_compact([(10.0, 20.0)])
+        assert _window_is_compact([(10.0, 20.0), (20.0, 30.0)])
+        assert _window_is_compact([(10.0, 20.0), (23.0, 30.0)]), "небольшой зазор — одно окно"
+        assert not _window_is_compact([(10.0, 20.0), (500.0, 510.0)]), "далёкие отрезки"
+        assert not _window_is_compact([])
+
+    def test_compact_window_is_downloaded_without_yt_dlp(self, sample_video, tmp_path, monkeypatch):
+        import video_clipper.source as source_module
+
+        calls = []
+
+        def fake_window(url, cfg, start, end, out_dir):
+            calls.append((start, end))
+            return sample_video, 4.0, {"title": "Из потока"}
+
+        monkeypatch.setattr(source_module, "download_window", fake_window)
+        cfg = _clean_config().with_overrides(cache_dir=tmp_path / "cache", use_sections=True)
+
+        def no_download(url, opts):
+            if opts.get("skip_download"):
+                return {"duration": 600}
+            raise AssertionError("yt-dlp не должен качать участок")
+
+        src = prepare_source("https://youtu.be/w", cfg, segments=[(10, 20)], downloader=no_download)
+        assert calls == [(10, 20)]
+        assert src.path == sample_video
+        assert src.offset == 4.0, "смещение берём из файла, а не из запроса"
+        assert src.kind == "section"
+
+    def test_failed_window_falls_back_to_yt_dlp(self, sample_video, tmp_path, monkeypatch):
+        import video_clipper.source as source_module
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("ffmpeg упал")
+
+        monkeypatch.setattr(source_module, "download_window", boom)
+        cfg = _clean_config().with_overrides(cache_dir=tmp_path / "cache", use_sections=True)
+        seen = []
+
+        def downloader(url, opts):
+            seen.append(opts)
+            if opts.get("skip_download"):
+                return {"duration": 600}
+            return {"requested_downloads": [{"filepath": str(sample_video)}]}
+
+        src = prepare_source("https://youtu.be/w", cfg, segments=[(10, 20)], downloader=downloader)
+        assert src.path == sample_video
+        assert any("download_ranges" in o for o in seen), "должен сработать обычный путь"
+
+
 class TestDownload:
     def test_uses_config_proxy_and_cookies(self, tmp_path, sample_video):
         cfg_file = tmp_path / "config.json"

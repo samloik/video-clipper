@@ -9,6 +9,8 @@ import subprocess
 import pytest
 
 from video_clipper.config import load_config
+from pathlib import Path
+
 from video_clipper.preview import (
     FRAME_CACHE_LIMIT,
     cached_frame,
@@ -228,6 +230,35 @@ class TestStream:
         assert cached_stream(url) == {}
         stream_info(url, cfg)
         assert cached_stream(url)["duration"] == 3458.0
+
+    def test_stream_addresses_survive_a_restart_and_a_bot_check(self, tmp_path, monkeypatch):
+        """Адрес потока кэшируется на диске: второй заказ не упирается в бот-чек."""
+        import video_clipper.source as source_module
+
+        cfg = self._cfg(tmp_path)
+
+        def ok(url, opts):
+            return {"url": "https://cdn.example/disk.mp4", "duration": 100.0,
+                    "width": 640, "height": 360, "fps": 25.0}
+
+        monkeypatch.setattr(source_module, "_ytdlp_extract", ok)
+        url = "https://youtu.be/DISK1"
+        stream_info(url, cfg)
+        cache_file = Path(cfg.cache_dir) / "streams.json"
+        assert cache_file.is_file(), "адрес должен лежать на диске"
+
+        # «перезапуск»: память пуста, а сайт отвечает бот-чеком
+        import video_clipper.preview as pv
+
+        pv._STREAM_CACHE.clear()
+
+        def bot_check(*args, **kwargs):
+            raise RuntimeError("ERROR: [youtube] X: Sign in to confirm you're not a bot")
+
+        monkeypatch.setattr(source_module, "_ytdlp_extract", bot_check)
+        got_url, meta = stream_info(url, cfg)
+        assert got_url == "https://cdn.example/disk.mp4"
+        assert meta["duration"] == 100.0
 
     def test_two_requests_for_one_source_extract_once(self, tmp_path, monkeypatch):
         """Две рамки просят поток одновременно — запрос к сайту должен быть один."""

@@ -254,14 +254,66 @@ def _source_lock(source: str) -> threading.Lock:
         return lock
 
 
+def _stream_cache_file(cfg: Config):
+    return Path(cfg.cache_dir).expanduser() / "streams.json"
+
+
+def _load_disk_stream(source: str, cfg: Config) -> tuple[str, dict] | None:
+    """Адрес потока, добытый прошлым запуском: сайт второй раз не дёргаем."""
+    path = _stream_cache_file(cfg)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    entry = data.get(source)
+    if not isinstance(entry, dict):
+        return None
+    if time.time() - float(entry.get("ts") or 0) >= STREAM_TTL:
+        return None
+    url = entry.get("url")
+    meta = entry.get("meta")
+    if not url or not isinstance(meta, dict):
+        return None
+    return str(url), dict(meta)
+
+
+def _save_disk_stream(source: str, url: str, meta: dict, cfg: Config) -> None:
+    path = _stream_cache_file(cfg)
+    data: dict = {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    now = time.time()
+    data = {k: v for k, v in data.items()
+            if isinstance(v, dict) and now - float(v.get("ts") or 0) < STREAM_TTL}
+    data[source] = {"ts": now, "url": url, "meta": meta}
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        pass
+
+
 def stream_info(source: str, cfg: Config) -> tuple[str, dict]:
     """Прямая ссылка на поток: кадр можно взять без скачивания файла.
 
     Сайт отдаёт временный URL на CDN; он живёт ограниченное время, поэтому
-    кэшируем недолго. Метаданные (длительность, размеры) приходят оттуда же.
+    кэшируем недолго — в памяти и на диске (второй заказ того же ролика
+    не должен снова попадать под бот-чек).
     """
     with _source_lock(source):
-        return _stream_info_locked(source, cfg)
+        try:
+            return _stream_info_locked(source, cfg)
+        except Exception:
+            saved = _load_disk_stream(source, cfg)
+            if saved is None:
+                raise
+            log.info("Сайт не отдал поток — беру адрес из прошлого запроса")
+            _STREAM_CACHE[source] = (time.time(), saved[0], saved[1])
+            return saved
 
 
 def _stream_info_locked(source: str, cfg: Config) -> tuple[str, dict]:
@@ -325,6 +377,7 @@ def _stream_info_locked(source: str, cfg: Config) -> tuple[str, dict]:
         "user_agent": (info.get("http_headers") or {}).get("User-Agent", ""),
     }
     _STREAM_CACHE[source] = (time.time(), url, meta)
+    _save_disk_stream(source, url, meta, cfg)
     return url, meta
 
 

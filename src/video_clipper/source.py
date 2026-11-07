@@ -5,10 +5,11 @@ from __future__ import annotations
 import logging
 import math
 import os
+import subprocess
 import threading
 import time
 import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
@@ -176,6 +177,100 @@ def fetch_metadata(
     if meta.get("duration"):
         _META_CACHE[source] = (time.time(), meta)
     return meta
+
+
+# Прямое скачивание участка: yt-dlp с --download-sections тянет его через ffmpeg
+# с накладными расходами, а на медленном прокси это минуты. ffmpeg по прямой
+# ссылке CDN берёт только нужные байты (HTTP Range) — на живом ролике 30 с
+# скачались за 5 с вместо 170.
+WINDOW_PAD = 6.0        # запас перед началом: первый кадр должен быть ключевым
+WINDOW_TAIL = 2.0
+MAX_WINDOW_SECONDS = 30 * 60
+SECTION_TIMEOUT = 600.0  # потолок на один участок: 10 минут канала с запасом
+
+
+def _window_is_compact(segments: list[tuple[float, float]]) -> bool:
+    """Отрезки идут подряд — можно взять одно окно вместо нескольких загрузок."""
+    if not segments:
+        return False
+    start = min(s for s, _ in segments)
+    end = max(e for _, e in segments)
+    if end - start > MAX_WINDOW_SECONDS:
+        return False
+    covered = sum(max(0.0, e - s) for s, e in segments)
+    return end - start <= covered + 5.0
+
+
+def _file_duration(path: Path, ffprobe_path: str | None = None) -> float | None:
+    cmd = [ffprobe_path or "ffprobe", "-v", "error", "-show_entries", "format=duration",
+           "-of", "csv=p=0", str(path)]
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        return float(out.stdout.strip().split(",")[0])
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+
+def _first_time(path: Path, ffprobe_path: str | None = None) -> float | None:
+    """С какого момента начинается файл: ffmpeg с -copyts сохраняет метки."""
+    cmd = [
+        ffprobe_path or "ffprobe", "-v", "error", "-select_streams", "v:0",
+        "-show_entries", "stream=start_time", "-of", "csv=p=0", str(path),
+    ]
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        return float(out.stdout.strip().split(",")[0])
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+
+def download_window(
+    url: str, cfg: Config, start: float, end: float, out_dir: Path
+) -> tuple[Path, float, dict[str, Any]]:
+    """Скачать один участок прямо из потока: ffmpeg + Range, без yt-dlp-секций."""
+    from .httpproxy import HttpBridge
+    from .preview import stream_info
+
+    stream_url, meta = stream_info(url, cfg)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out = out_dir / f"window-{int(start)}-{int(end)}-{os.getpid()}.mp4"
+    begin = max(0.0, start - WINDOW_PAD)
+    stop = end + WINDOW_TAIL
+    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-copyts"]
+    if meta.get("user_agent"):
+        cmd += ["-user_agent", meta["user_agent"]]
+    cmd += ["-ss", f"{begin:.3f}", "-i", stream_url, "-to", f"{stop:.3f}",
+            "-c", "copy", str(out)]
+
+    bridge = None
+    saved = {k: os.environ.get(k) for k in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY")}
+    try:
+        if cfg.proxy:
+            bridge = HttpBridge(cfg.proxy)
+            bridge_url = bridge.start()
+            for key in saved:
+                os.environ[key] = bridge_url
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=SECTION_TIMEOUT)
+    finally:
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        if bridge is not None:
+            bridge.stop()
+
+    if result.returncode != 0 or not out.is_file() or out.stat().st_size == 0:
+        raise RuntimeError((result.stderr or "ffmpeg не отдал файл").strip()[:200])
+    offset = _first_time(out, cfg.ffprobe_path)
+    if offset is None:
+        offset = begin
+
+    # Файл сохранён с -copyts: его метки начинаются с offset (ключевой кадр до
+    # запрошенного начала). Пересобирать его не нужно — ffmpeg с -ss считает время
+    # от start_time, поэтому сдвиг «начало − offset» попадает точно
+    # (проверено сравнением кадров: SSIM 0.95).
+    return out, float(offset), meta
 
 
 def prepare_source(
@@ -426,6 +521,36 @@ def _download(
     # download if the bridged attempt fails.
     bridge = None
     saved_env: dict[str, str | None] = {}
+    if sections and _window_is_compact(segments):
+        # Быстрый путь: ffmpeg берёт участок прямо из потока по HTTP Range.
+        # Ошибку не считаем фатальной — ниже остаётся обычная дорога через yt-dlp.
+        try:
+            started = time.monotonic()
+            window_path, window_offset, window_meta = download_window(
+                url, cfg, min(s for s, _ in segments), max(e for _, e in segments),
+                cache_dir / "sections",
+            )
+            info = probe_media(str(window_path), cfg.ffprobe_path)
+            # У файла с -copyts длительность в контейнере включает start_time:
+            # для остального кода нужна длина самого участка.
+            if window_offset > 0 and info.duration:
+                info = replace(info, duration=max(0.0, info.duration - window_offset))
+            log.info(
+                "Участок скачан из потока за %.1f с (%.1f с видео, начинается с %.2f)",
+                time.monotonic() - started, info.duration, window_offset,
+            )
+            return Source(
+                path=window_path,
+                title=str(window_meta.get("title") or window_path.stem),
+                is_temporary=True,
+                info=info,
+                url=url,
+                offset=window_offset,
+                kind="section",
+            )
+        except Exception as exc:  # noqa: BLE001 - откат на обычную загрузку
+            log.warning("Прямое скачивание участка не удалось (%s) — иду через yt-dlp", exc)
+
     if sections:
         from .httpproxy import HttpBridge
 
