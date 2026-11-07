@@ -182,6 +182,44 @@ class TestErrorContext:
         assert "9:16" in text
 
 
+class TestInfoExamples:
+    """Примеры в /info должны быть настоящими запросами, а не декорацией."""
+
+    def _examples(self, tmp_path) -> list[str]:
+        text = build_info(_cfg(tmp_path))
+        return [
+            line.strip()
+            for line in text.splitlines()
+            if line.strip().startswith("https://youtu.be/ID")
+        ]
+
+    def test_every_example_parses(self, tmp_path):
+        examples = self._examples(tmp_path)
+        assert len(examples) >= 6, examples
+        for line in examples:
+            request = parse_request(line)
+            assert request is not None, line
+            assert request.source.startswith("https://youtu.be/ID"), line
+            assert request.segments, line
+
+    def test_examples_show_the_modes(self, tmp_path):
+        parsed = {line: parse_request(line) for line in self._examples(tmp_path)}
+        vertical_blur = [r for line, r in parsed.items() if "вертикально фон" in line][0]
+        assert vertical_blur.vertical and vertical_blur.layout == "blur"
+
+        to_end = [r for line, r in parsed.items() if "11-*" in line][0]
+        assert is_open_end(to_end.segments[0]) and to_end.horizontal == 0.3
+
+        window = [r for line, r in parsed.items() if "окно 70%" in line][0]
+        assert window.horizontal == 0.7 and window.segments[0].end > 60
+
+        fast = [r for line, r in parsed.items() if line.endswith("fast")][0]
+        assert fast.fast is True
+
+        chained = [line for line in parsed if ";" in line][0]
+        assert len(parsed[chained].segments) == 2
+
+
 class TestHorizontalWord:
     def test_parse_position_from_words(self):
         assert parse_request("https://youtu.be/ID вертикально сместить 30").horizontal == 0.3
