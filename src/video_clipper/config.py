@@ -33,7 +33,9 @@ DEFAULTS: dict[str, Any] = {
     # split — режем клип на части без пересжатия, compress — вписываем в лимит
     "telegram_policy": "split",
     "gui_host": "127.0.0.1",
-    "gui_port": 8765,
+    # пароль GUI читается из файла, чтобы не держать его в конфиге
+    "gui_password_file": None,
+    "gui_port": 8766,
     "log_file": "./video-clipper.log",
 }
 
@@ -62,6 +64,7 @@ class Config:
     telegram_chat_ids: tuple[int, ...]
     telegram_policy: str
     gui_host: str
+    gui_password_file: Path | None
     gui_port: int
     log_file: Path
 
@@ -104,6 +107,11 @@ def _from_mapping(data: dict[str, Any]) -> Config:
         telegram_chat_ids=tuple(int(x) for x in merged["telegram_chat_ids"] or ()),
         telegram_policy=str(merged["telegram_policy"] or "split"),
         gui_host=str(merged["gui_host"]),
+        gui_password_file=(
+            Path(str(merged["gui_password_file"])).expanduser()
+            if merged["gui_password_file"]
+            else None
+        ),
         gui_port=int(merged["gui_port"]),
         log_file=Path(str(merged["log_file"])).expanduser(),
     )

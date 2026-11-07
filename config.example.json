@@ -9,6 +9,7 @@
   "keep_source": false,
   "use_sections": false,
   "gui_host": "127.0.0.1",
-  "gui_port": 8765,
-  "log_file": "./video-clipper.log"
+  "gui_port": 8766,
+  "log_file": "./video-clipper.log",
+  "gui_password_file": "~/.hermes/video-clipper-gui.password"
 }

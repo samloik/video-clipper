@@ -7,8 +7,12 @@ thread and reports progress through /api/jobs/<id>.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import logging
+import os
+import secrets
 import threading
 import time
 import uuid
@@ -27,6 +31,72 @@ from .source import is_url
 log = logging.getLogger("video_clipper")
 
 MAX_UPLOAD = 4 * 1024 * 1024 * 1024  # 4 GB
+SESSION_COOKIE = "vc_session"
+SESSION_MAX_AGE = 12 * 3600
+LOGIN_WINDOW = 600.0
+LOGIN_ATTEMPTS = 6
+
+LOGIN_PAGE = """<!doctype html>
+<html lang="ru"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>video-clipper — вход</title>
+<style>
+ body{font:16px/1.5 system-ui,sans-serif;background:#111418;color:#e7e9ee;margin:0;
+      display:flex;min-height:100vh;align-items:center;justify-content:center}
+ form{background:#1a1e24;padding:28px;border-radius:14px;min-width:280px;
+      box-shadow:0 8px 30px #0006}
+ h1{font-size:18px;margin:0 0 16px}
+ input{width:100%;padding:11px;border-radius:9px;border:1px solid #2c333d;
+       background:#111418;color:#e7e9ee;font-size:16px;box-sizing:border-box}
+ button{margin-top:14px;width:100%;padding:11px;border:0;border-radius:9px;
+        background:#3b82f6;color:#fff;font-size:16px;cursor:pointer}
+ p.err{color:#f87171;margin:0 0 12px;font-size:14px}
+</style></head><body>
+<form method="post" action="/login">
+  <h1>video-clipper</h1>
+  {error}
+  <input type="password" name="password" placeholder="пароль" autofocus autocomplete="current-password">
+  <button type="submit">Войти</button>
+</form></body></html>"""
+
+
+class Auth:
+    """Password gate for the GUI, with a lightweight brute-force brake.
+
+    The session cookie is an HMAC of a per-process random secret, so restarting
+    the server invalidates every session — which is the behaviour we want.
+    """
+
+    def __init__(self, password: str | None):
+        self.password = (password or "").strip()
+        self.enabled = bool(self.password)
+        self._secret = secrets.token_bytes(32)
+        self._attempts: dict[str, list[float]] = {}
+        self._lock = threading.Lock()
+
+    def token(self) -> str:
+        return hmac.new(self._secret, b"session", hashlib.sha256).hexdigest()
+
+    def check_cookie(self, value: str | None) -> bool:
+        return bool(value) and hmac.compare_digest(value, self.token())
+
+    def check_password(self, candidate: str) -> bool:
+        return self.enabled and hmac.compare_digest(candidate, self.password)
+
+    def blocked(self, client: str) -> bool:
+        now = time.time()
+        with self._lock:
+            attempts = [t for t in self._attempts.get(client, []) if now - t < LOGIN_WINDOW]
+            self._attempts[client] = attempts
+            return len(attempts) >= LOGIN_ATTEMPTS
+
+    def note_failure(self, client: str) -> None:
+        with self._lock:
+            self._attempts.setdefault(client, []).append(time.time())
+
+    def clear(self, client: str) -> None:
+        with self._lock:
+            self._attempts.pop(client, None)
 
 PAGE = """<!doctype html>
 <html lang="ru">
@@ -275,9 +345,75 @@ def _dumps(payload: Any) -> bytes:
     return json.dumps(payload, ensure_ascii=False).encode("utf-8")
 
 
-def make_handler(cfg: Config, clipper: Callable[..., list[ClipResult]] = default_clipper):
+def make_handler(
+    cfg: Config,
+    clipper: Callable[..., list[ClipResult]] = default_clipper,
+    auth: "Auth | None" = None,
+):
+    auth_gate: Auth = auth if auth is not None else Auth(None)
+
     class Handler(BaseHTTPRequestHandler):
         server_version = "video-clipper"
+
+        def _client(self) -> str:
+            return self.client_address[0] if self.client_address else "?"
+
+        def _cookie(self) -> str | None:
+            raw = self.headers.get("Cookie") or ""
+            for chunk in raw.split(";"):
+                name, _, value = chunk.strip().partition("=")
+                if name == SESSION_COOKIE:
+                    return value
+            return None
+
+        def _authorized(self) -> bool:
+            return (not auth_gate.enabled) or auth_gate.check_cookie(self._cookie())
+
+        def _redirect(self, location: str, code: int = 303) -> None:
+            self.send_response(code)
+            self.send_header("Location", location)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def _login_page(self, error: str = "", code: int = 200) -> None:
+            body = LOGIN_PAGE.replace("{error}", f'<p class="err">{error}</p>' if error else "")
+            self._send(code, body.encode("utf-8"), "text/html; charset=utf-8")
+
+        def _handle_login(self, body: bytes) -> None:
+            from urllib.parse import parse_qs
+
+            client = self._client()
+            if auth_gate.blocked(client):
+                self._login_page("слишком много попыток — подождите несколько минут", 429)
+                return
+            try:
+                password = (parse_qs(body.decode("utf-8", "ignore")).get("password") or [""])[0]
+            except Exception:  # noqa: BLE001
+                password = ""
+            if not auth_gate.check_password(password):
+                auth_gate.note_failure(client)
+                log.warning("GUI: неверный пароль с %s", client)
+                self._login_page("неверный пароль", 401)
+                return
+            auth_gate.clear(client)
+            self.send_response(303)
+            self.send_header(
+                "Set-Cookie",
+                f"{SESSION_COOKIE}={auth_gate.token()}; Path=/; HttpOnly; SameSite=Lax; "
+                f"Max-Age={SESSION_MAX_AGE}",
+            )
+            self.send_header("Location", "/")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def _handle_logout(self) -> None:
+            self.send_response(303)
+            self.send_header(
+                "Set-Cookie", f"{SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"
+            )
+            self.send_header("Location", "/login")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
 
         def log_message(self, fmt: str, *args: Any) -> None:  # quieter default logging
             log.debug("gui: " + fmt, *args)
@@ -295,11 +431,26 @@ def make_handler(cfg: Config, clipper: Callable[..., list[ClipResult]] = default
 
         def do_GET(self) -> None:  # noqa: N802
             path = urlparse(self.path).path
-            if path in ("/", "/index.html"):
-                self._send(200, PAGE.encode("utf-8"), "text/html; charset=utf-8")
-                return
             if path == "/api/health":
                 self._send(200, _dumps({"status": "ok"}))
+                return
+            if path == "/login":
+                if not auth_gate.enabled:
+                    self._redirect("/")
+                else:
+                    self._login_page()
+                return
+            if path == "/logout":
+                self._handle_logout()
+                return
+            if not self._authorized():
+                if path.startswith("/api/"):
+                    self._error(401, "нужен вход: откройте /login")
+                else:
+                    self._redirect("/login")
+                return
+            if path in ("/", "/index.html"):
+                self._send(200, PAGE.encode("utf-8"), "text/html; charset=utf-8")
                 return
             if path.startswith("/api/jobs/"):
                 job_id = path.rsplit("/", 1)[-1]
@@ -340,6 +491,16 @@ def make_handler(cfg: Config, clipper: Callable[..., list[ClipResult]] = default
         def do_POST(self) -> None:  # noqa: N802
             parsed = urlparse(self.path)
             length = int(self.headers.get("Content-Length") or 0)
+            if parsed.path == "/login" and length <= 4096:
+                self._handle_login(self.rfile.read(length) if length else b"")
+                return
+            if not self._authorized():
+                self.rfile.read(length) if length else None  # drain, keep the socket sane
+                if parsed.path.startswith("/api/"):
+                    self._error(401, "нужен вход: откройте /login")
+                else:
+                    self._redirect("/login")
+                return
             if length > MAX_UPLOAD:
                 self._error(413, "файл слишком большой")
                 return
@@ -399,11 +560,38 @@ def make_handler(cfg: Config, clipper: Callable[..., list[ClipResult]] = default
     return Handler
 
 
-def create_server(cfg: Config, clipper: Callable[..., list[ClipResult]] = default_clipper,
-                  host: str | None = None, port: int | None = None) -> ThreadingHTTPServer:
+LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
+
+def read_gui_password(cfg: Config) -> str | None:
+    """Password from the file named in the config, or from the environment."""
+    env = (os.environ.get("VIDEO_CLIPPER_GUI_PASSWORD") or "").strip()
+    if env:
+        return env
+    path = cfg.gui_password_file
+    if path and path.is_file():
+        return path.read_text(encoding="utf-8").strip() or None
+    return None
+
+
+def create_server(
+    cfg: Config,
+    clipper: Callable[..., list[ClipResult]] = default_clipper,
+    host: str | None = None,
+    port: int | None = None,
+    password: str | None = None,
+) -> ThreadingHTTPServer:
     bind_host = host or cfg.gui_host or "127.0.0.1"
     bind_port = cfg.gui_port if port is None else port
-    httpd = ThreadingHTTPServer((bind_host, bind_port), make_handler(cfg, clipper))
+    password = password if password is not None else read_gui_password(cfg)
+    if bind_host not in LOOPBACK_HOSTS and not (password or "").strip():
+        # Fail closed: an unprotected GUI handing out files over the LAN is worse
+        # than a GUI that refuses to start.
+        raise RuntimeError(
+            f"GUI на {bind_host} без пароля запрещён. Создай файл с паролем и укажи его "
+            f"в конфиге: gui_password_file, либо задай VIDEO_CLIPPER_GUI_PASSWORD."
+        )
+    httpd = ThreadingHTTPServer((bind_host, bind_port), make_handler(cfg, clipper, Auth(password)))
     httpd.daemon_threads = True
     return httpd
 

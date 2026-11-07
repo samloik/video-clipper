@@ -45,6 +45,123 @@ def server_factory(cfg, tmp_path):
         thread.join(timeout=5)
 
 
+@pytest.fixture()
+def auth_server(cfg, tmp_path):
+    """GUI on a non-loopback host with a password, as it runs in the LAN."""
+    servers = []
+
+    def start(password: str = "s3cret"):
+        httpd = create_server(cfg, fake_clipper(tmp_path / "clip.mp4"), host="0.0.0.0",
+                              port=0, password=password)
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        servers.append((httpd, thread))
+        return f"http://127.0.0.1:{httpd.server_address[1]}"
+
+    yield start
+    for httpd, thread in servers:
+        httpd.shutdown()
+        httpd.server_close()
+        thread.join(timeout=5)
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """urllib follows redirects by default, which hides the 303 from the test."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D102
+        return None
+
+
+_opener = urllib.request.build_opener(_NoRedirect)
+
+
+def _get(url, cookie=None, method="GET", data=None):
+    req = urllib.request.Request(url, method=method, data=data)
+    if cookie:
+        req.add_header("Cookie", cookie)
+    try:
+        with _opener.open(req, timeout=10) as resp:
+            return resp.status, resp.read(), resp.headers
+    except urllib.error.HTTPError as exc:
+        return exc.code, exc.read(), exc.headers
+
+
+class TestAuth:
+    def test_lan_bind_without_password_is_refused(self, cfg, tmp_path):
+        with pytest.raises(RuntimeError, match="без пароля запрещён"):
+            create_server(cfg, fake_clipper(tmp_path / "c.mp4"), host="0.0.0.0", port=0, password="")
+
+    def test_loopback_without_password_stays_open(self, cfg, tmp_path):
+        httpd = create_server(cfg, fake_clipper(tmp_path / "c.mp4"), host="127.0.0.1", port=0)
+        assert httpd.server_address[0] == "127.0.0.1"
+        httpd.server_close()
+
+    def test_page_requires_login(self, auth_server):
+        base = auth_server()
+        status, _, headers = _get(base + "/")
+        assert status == 303
+        assert headers["Location"] == "/login"
+
+    def test_login_page_is_served(self, auth_server):
+        status, body, _ = _get(auth_server() + "/login")
+        assert status == 200
+        assert b"password" in body.lower()
+
+    def test_api_is_closed_without_cookie(self, auth_server):
+        status, body, _ = _get(auth_server() + "/api/jobs/abc")
+        assert status == 401
+        assert "вход" in json.loads(body)["error"]
+
+    def test_health_stays_open(self, auth_server):
+        status, body, _ = _get(auth_server() + "/api/health")
+        assert status == 200 and json.loads(body)["status"] == "ok"
+
+    def test_wrong_password_is_rejected(self, auth_server):
+        base = auth_server()
+        status, body, _ = _get(base + "/login", method="POST",
+                               data=b"password=nope")
+        assert status == 401
+        assert "неверный пароль".encode() in body
+
+    def test_correct_password_opens_the_gui(self, auth_server):
+        base = auth_server()
+        status, _, headers = _get(base + "/login", method="POST", data=b"password=s3cret")
+        assert status == 303
+        cookie = headers["Set-Cookie"].split(";")[0]
+        assert cookie.startswith("vc_session=")
+        assert "HttpOnly" in headers["Set-Cookie"]
+
+        status, body, _ = _get(base + "/", cookie=cookie)
+        assert status == 200 and b"video-clipper" in body.lower()
+
+        status, body, _ = _get(base + "/api/health", cookie=cookie)
+        assert status == 200
+
+    def test_cookie_does_not_survive_a_restart(self, auth_server):
+        base = auth_server()
+        _, _, headers = _get(base + "/login", method="POST", data=b"password=s3cret")
+        cookie = headers["Set-Cookie"].split(";")[0]
+        other = auth_server()
+        status, _, _ = _get(other + "/", cookie=cookie)
+        assert status == 303, "токен подписан секретом процесса — чужой не годится"
+
+    def test_brute_force_is_slowed_down(self, auth_server):
+        base = auth_server()
+        codes = [
+            _get(base + "/login", method="POST", data=b"password=bad")[0] for _ in range(7)
+        ]
+        assert codes[:6] == [401] * 6
+        assert codes[-1] == 429
+
+    def test_logout_clears_the_cookie(self, auth_server):
+        base = auth_server()
+        _, _, headers = _get(base + "/login", method="POST", data=b"password=s3cret")
+        cookie = headers["Set-Cookie"].split(";")[0]
+        status, _, headers = _get(base + "/logout", cookie=cookie)
+        assert status == 303
+        assert "Max-Age=0" in headers["Set-Cookie"]
+
+
 def fake_clipper(out_path: Path, fail: bool = False):
     def _clip(source, segments, fast, cfg, progress=None):
         if fail:
