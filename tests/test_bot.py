@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from video_clipper.bot import handle_message, parse_request, split_long
+from video_clipper.bot import describe_request, handle_message, parse_request, split_long
 from video_clipper.config import load_config
 from video_clipper.cut import ClipResult
 from video_clipper.segments import Segment
@@ -418,6 +418,43 @@ class TestWholeVideo:
         assert botmod.JOBS, "задание должно быть сохранено для кнопок"
 
 
+def _request(text: str):
+    request = parse_request(text)
+    assert request is not None, text
+    return request
+
+
+class TestDescribeRequest:
+    def test_echoes_a_single_range(self):
+        text = describe_request(_request("https://youtu.be/x 0:00-:20"))
+        assert "0:00–0:20" in text and "20 с" in text and "Режу..." in text
+
+    def test_echoes_duration_as_start_and_end(self):
+        text = describe_request(_request("https://youtu.be/x 1:00=0:30"))
+        assert "1:00–1:30" in text
+
+    def test_numbers_several_ranges_and_names_the_mode(self):
+        text = describe_request(_request("https://youtu.be/x 0:10-0:20; 2:00=45 fast вертикально"))
+        assert text.startswith("Понял так — 2 отрезка, режим: без перекодирования, вертикально 9:16")
+        assert "1. 0:10–0:20 (10 с)" in text
+        assert "2. 2:00–2:45 (45 с)" in text
+
+    def test_whole_video_is_said_plainly(self):
+        assert "беру ролик целиком" in describe_request(_request("https://youtu.be/x"))
+
+    def test_long_lists_are_truncated(self):
+        ranges = "; ".join(f"{i}:00-{i}:10" for i in range(12))
+        text = describe_request(_request(f"https://youtu.be/x {ranges}"))
+        assert "Понял так — 12 отрезков" in text
+        assert "...и ещё 4" in text
+
+    def test_bot_sends_the_echo(self, tmp_path):
+        bot = FakeBot()
+        handle_message(bot, _cfg(tmp_path), {"chat": {"id": 1}, "text": "https://youtu.be/x 0:10-0:20"},
+                       clipper=make_clipper(tmp_path))
+        assert any("Понял так" in text for _, text in bot.messages)
+
+
 class TestControls:
     def test_stop_sets_flag_and_replies(self, tmp_path, monkeypatch):
         import video_clipper.bot as botmod
@@ -497,7 +534,7 @@ class TestHandleMessage:
         handle_message(bot, cfg, {"chat": {"id": 1}, "text": "https://youtu.be/x 0:01-0:04"}, clipper=make_clipper(tmp_path))
         assert len(bot.videos) == 1
         assert bot.videos[0][0] == 1
-        assert any("Принял" in text for _, text in bot.messages)
+        assert any("Понял так" in text for _, text in bot.messages)
 
     def test_rejects_foreign_chat(self, tmp_path):
         bot = FakeBot()

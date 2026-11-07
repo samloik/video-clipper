@@ -112,6 +112,20 @@ def format_timecode(seconds: float, decimals: int = 3) -> str:
     return f"{int(hours):02d}:{int(minutes):02d}:{int(secs):02d}"
 
 
+def human_timecode(seconds: float) -> str:
+    """Compact form for the chat: ``0:20``, ``3:45``, ``1:02:03``, ``1:12.5``."""
+    total = round(float(seconds), 3)
+    hours, rest = divmod(total, 3600)
+    minutes, secs = divmod(rest, 60)
+    if secs == int(secs):
+        sec_text = f"{int(secs):02d}"
+    else:
+        sec_text = f"{secs:04.1f}"
+    if hours:
+        return f"{int(hours)}:{int(minutes):02d}:{sec_text}"
+    return f"{int(minutes)}:{sec_text}"
+
+
 def filename_timecode(seconds: float) -> str:
     """Compact, filesystem-safe timecode: ``HHMMSS`` or ``HHMMSS-mmm``."""
     total = round(float(seconds), 3)

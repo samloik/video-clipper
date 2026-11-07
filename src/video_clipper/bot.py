@@ -459,6 +459,47 @@ def parse_request(text: str) -> Request | None:
     return Request(source=source, segments=segments, fast=fast, vertical=vertical, layout=layout)
 
 
+def _plural(count: int, one: str, few: str, many: str) -> str:
+    if count % 10 == 1 and count % 100 != 11:
+        return one
+    if 2 <= count % 10 <= 4 and not 12 <= count % 100 <= 14:
+        return few
+    return many
+
+
+def describe_request(request: "Request", limit: int = 8) -> str:
+    """Repeat the parsed request back, so a misread timecode is visible at once."""
+    from .timecode import human_timecode
+
+    modes = [
+        name
+        for name, enabled in (
+            ("без перекодирования", request.fast),
+            ("вертикально 9:16", request.vertical),
+            ("размытый фон", request.vertical and request.layout == "blur"),
+        )
+        if enabled
+    ]
+    mode_text = f", режим: {', '.join(modes)}" if modes else ", режим: точный"
+    if not request.segments:
+        return (
+            f"Таймкодов нет — беру ролик целиком{mode_text}.\n"
+            f"Качаю, это может занять пару минут..."
+        )
+    count = len(request.segments)
+    lines = [f"Понял так — {count} {_plural(count, 'отрезок', 'отрезка', 'отрезков')}{mode_text}:"]
+    for index, seg in enumerate(request.segments[:limit], 1):
+        number = f"{index}. " if count > 1 else ""
+        lines.append(
+            f"{number}{human_timecode(seg.start)}–{human_timecode(seg.end)} "
+            f"({seg.duration:g} с)"
+        )
+    if count > limit:
+        lines.append(f"...и ещё {count - limit}")
+    lines.append("Режу...")
+    return "\n".join(lines)
+
+
 def segments_from_text(body: str) -> list[Segment]:
     """Pull ranges out of free text without ever guessing at a number."""
 
@@ -628,14 +669,7 @@ def handle_message(bot, cfg: Config, message: dict, clipper=None) -> None:
 
     LAST_REQUESTS[chat_id] = request
     STOP_REQUESTED.clear()
-    if request.segments:
-        bot.send_message(
-            chat_id,
-            f"Принял: {len(request.segments)} отрезок(ов), "
-            f"режим {'fast' if request.fast else 'точный'}. Режу...",
-        )
-    else:
-        bot.send_message(chat_id, "Качаю ролик целиком, это может занять пару минут...")
+    bot.send_message(chat_id, describe_request(request))
     bot.send_chat_action(chat_id, "record_video")
 
     job: dict | None = None
