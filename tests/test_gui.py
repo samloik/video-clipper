@@ -237,6 +237,48 @@ class TestPageAndHealth:
         assert 'askConfirm(' in PAGE, "очистка должна спрашивать свой диалог"
 
 
+class TestDownload:
+    def test_attachment_header_survives_a_dash(self):
+        from video_clipper.gui import attachment_header
+
+        name = "clip - [00:00:00\u201300:00:20].mp4"
+        header = attachment_header(name)
+        header.encode("latin-1")  # заголовки уходят только в latin-1
+        assert "filename*=UTF-8''" in header
+        assert "%E2%80%93" in header, "en dash должен быть процентно закодирован"
+        assert "\u2013" not in header
+
+    def test_download_with_unicode_name_returns_bytes(self, server_factory, tmp_path):
+        name = "clip - [00:00:00\u201300:00:20].mp4"
+
+        def clipper(source, segments, fast, cfg, progress=None, vertical=False, layout="crop"):
+            out = tmp_path / "out" / name
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_bytes(b"clip-bytes" * 100)
+            return [
+                ClipResult(source=source, segment=segments[0], output_path=out,
+                           duration=2.0, mode="accurate", size_bytes=1000)
+            ]
+
+        base = server_factory(clipper)
+        media = tmp_path / "v.mp4"
+        media.write_bytes(b"x")
+        status, body = post_json(
+            base, "/api/clip", {"source": str(media), "start": "0:00", "end": "0:02"}
+        )
+        assert status == 202
+        job_id = body["job_id"]
+        for _ in range(50):
+            job = json.loads(get(base, f"/api/jobs/{job_id}")[1])
+            if job["state"] != "running":
+                break
+            time.sleep(0.05)
+        status, payload, headers = _get(base + f"/api/download/{job_id}/0")
+        assert status == 200, payload
+        assert payload == b"clip-bytes" * 100
+        assert headers.get("Content-Length") == str(len(payload))
+
+
 class TestServicePanel:
     def test_panel_lives_in_the_result_column(self):
         from video_clipper.gui import PAGE

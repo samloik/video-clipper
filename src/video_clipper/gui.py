@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import secrets
+import shutil
 import threading
 import time
 import uuid
@@ -20,7 +21,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import unquote, urlparse
+from urllib.parse import quote, unquote, urlparse
 
 from .config import Config, load_config
 from .cut import ClipResult
@@ -875,6 +876,15 @@ def default_clipper(
         src.cleanup()
 
 
+def attachment_header(name: str) -> str:
+    """Content-Disposition that survives non-ASCII names (headers are latin-1 only)."""
+    ascii_name = name.encode("ascii", "replace").decode("ascii").replace('"', "'")
+    return (
+        f'attachment; filename="{ascii_name}"; '
+        f"filename*=UTF-8''{quote(name, safe='')}"
+    )
+
+
 def status_text(cfg: Config) -> str:
     """Что лежит на машине — тот же ответ, что /status у бота."""
     from .storage import describe
@@ -1001,7 +1011,23 @@ def make_handler(
         def _error(self, code: int, message: str) -> None:
             self._send(code, _dumps({"error": message}))
 
+        def _guard(self, handler) -> None:
+            """Never let an exception kill the connection with no response."""
+            try:
+                handler()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            except Exception:  # noqa: BLE001 — the browser deserves an answer
+                log.exception("ошибка в обработчике %s", self.path)
+                try:
+                    self._error(500, "внутренняя ошибка, смотри журнал")
+                except Exception:  # noqa: BLE001
+                    pass
+
         def do_GET(self) -> None:  # noqa: N802
+            self._guard(self._handle_get)
+
+        def _handle_get(self) -> None:
             path = urlparse(self.path).path
             if path == "/api/health":
                 self._send(200, _dumps({"status": "ok"}))
@@ -1056,17 +1082,20 @@ def make_handler(
                 if not file_path.is_file():
                     self._error(404, "файл удалён")
                     return
-                data = file_path.read_bytes()
                 self.send_response(200)
                 self.send_header("Content-Type", "video/mp4")
-                self.send_header("Content-Disposition", f'attachment; filename="{file_path.name}"')
-                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Content-Disposition", attachment_header(file_path.name))
+                self.send_header("Content-Length", str(file_path.stat().st_size))
                 self.end_headers()
-                self.wfile.write(data)
+                with file_path.open("rb") as src:
+                    shutil.copyfileobj(src, self.wfile, 1 << 20)
                 return
             self._error(404, "не найдено")
 
         def do_POST(self) -> None:  # noqa: N802
+            self._guard(self._handle_post)
+
+        def _handle_post(self) -> None:
             parsed = urlparse(self.path)
             length = int(self.headers.get("Content-Length") or 0)
             if parsed.path == "/login" and length <= 4096:
