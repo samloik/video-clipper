@@ -31,6 +31,8 @@ from .config import Config, apply_retention_override, load_config
 from .cut import ClipResult, CutCancelled, clamp_horizontal
 from .probe import EnvironmentProblem, check_tools
 from .preview import (
+    cached_frame,
+    closest_frame,
     ensure_window,
     find_window,
     grab_frame,
@@ -323,6 +325,7 @@ input::placeholder{color:#78818e}
   background:#0b0d10;border:1px solid var(--line);display:block}
 .preview figcaption{font-size:11px;color:var(--ink-3)}
 .preview figcaption b{color:var(--ink-2);font-weight:500}
+.preview .frame-note{color:var(--err);font-size:10.5px}
 .preview .stepper{display:flex;gap:4px;margin-top:2px}
 .preview .stepper button{flex:1;min-height:24px;padding:1px 4px;font-size:10.5px;
   border-radius:6px;border:1px solid var(--line);background:transparent;color:var(--ink-2);
@@ -518,7 +521,8 @@ input::placeholder{color:#78818e}
         <div class="thumbs">
           <figure>
             <img id="thumb-start" alt="кадр в начале отрезка">
-            <figcaption>начало <b id="cap-start" class="mono">0:00</b></figcaption>
+            <figcaption>начало <b id="cap-start" class="mono">0:00</b>
+              <span class="frame-note" id="note-start"></span></figcaption>
             <div class="stepper" data-field="start">
               <button type="button" data-step="-1" title="начало на секунду раньше">−1 с</button>
               <button type="button" data-step="-frame" title="начало на кадр раньше">− кадр</button>
@@ -528,7 +532,8 @@ input::placeholder{color:#78818e}
           </figure>
           <figure>
             <img id="thumb-end" alt="кадр в конце отрезка">
-            <figcaption>конец <b id="cap-end" class="mono">0:30</b></figcaption>
+            <figcaption>конец <b id="cap-end" class="mono">0:30</b>
+              <span class="frame-note" id="note-end"></span></figcaption>
             <div class="stepper" data-field="end">
               <button type="button" data-step="-1" title="конец на секунду раньше">−1 с</button>
               <button type="button" data-step="-frame" title="конец на кадр раньше">− кадр</button>
@@ -1073,23 +1078,37 @@ function frameUrl(tc) {
     '&t=' + t.toFixed(3) + '&w=360&_=' + Date.now();
 }
 
-async function loadFrame(img, tc, onMissing) {
+async function loadFrame(img, tc, onMissing, noteEl) {
+  // Ответы на частые клики приходят вперемешку: номер запроса не даёт
+  // устаревшему кадру перебить свежий и стереть уже показанную картинку.
+  const seq = String(Number(img.dataset.seq || 0) + 1);
+  img.dataset.seq = seq;
+  const fresh = () => img.dataset.seq === seq;
+  const mark = (text) => { if (noteEl && fresh()) noteEl.textContent = text; };
   try {
     const res = await fetch(frameUrl(tc));
+    if (!fresh()) return;
     if (!res.ok) {
       const data = await res.json().catch(() => ({}));
-      img.removeAttribute('src');
+      // старый кадр не стираем, но и молчать нельзя: подписываем, что он устарел
+      mark('· кадр не обновился');
       if (onMissing) onMissing(data.error || '');
       return;
     }
     const blob = await res.blob();
-    if (img.dataset.url) URL.revokeObjectURL(img.dataset.url);
+    if (!fresh()) return;
+    const previous = img.dataset.url;
     const local = URL.createObjectURL(blob);
     img.dataset.url = local;
     img.src = local;
     img.alt = 'кадр ' + tc;
+    img.onload = () => {
+      if (previous && previous !== local) URL.revokeObjectURL(previous);
+      img.onload = null;
+    };
+    mark(res.headers.get('X-Frame-Approx') ? '· ближайший кадр' : '');
   } catch (err) {
-    img.removeAttribute('src');
+    mark('· кадр не обновился');
     if (onMissing) onMissing('');
   }
 }
@@ -1108,6 +1127,9 @@ function refreshThumbs() {
   const endSec = end && end !== '*' ? toSeconds(end) : null;
   $('cap-start').textContent = start || '0:00';
   $('cap-end').textContent = end || '—';
+  // точные границы известны — не гоняем сервер за кадром, которого нет
+  const beyond = (seconds) => mediaInfo && mediaInfo.duration && !mediaInfo.window &&
+    seconds > mediaInfo.duration + 0.05;
   const missing = (error) => {
     if (error && /обрезан/i.test(error)) {
       $('prep-frames').hidden = true;
@@ -1116,13 +1138,20 @@ function refreshThumbs() {
     }
     offerWindowDownload(error ? 'кадров нет: ' + error : '');
   };
-  loadFrame($('thumb-start'), start || '0', missing);
+  if (beyond(startSec)) {
+    $('note-start').textContent = '· за концом ролика (' + fmtTC(mediaInfo.duration) + ')';
+  } else {
+    loadFrame($('thumb-start'), start || '0', missing, $('note-start'));
+  }
   if (endSec === null) {
     const endImg = $('thumb-end');
     endImg.removeAttribute('src');
     endImg.alt = 'конец не задан';
+    $('note-end').textContent = '';
+  } else if (beyond(endSec)) {
+    $('note-end').textContent = '· за концом ролика (' + fmtTC(mediaInfo.duration) + ')';
   } else {
-    loadFrame($('thumb-end'), end, missing);
+    loadFrame($('thumb-end'), end, missing, $('note-end'));
   }
 }
 
@@ -2150,11 +2179,19 @@ def make_handler(
         def log_message(self, fmt: str, *args: Any) -> None:  # quieter default logging
             log.debug("gui: " + fmt, *args)
 
-        def _send(self, code: int, body: bytes, content_type: str = "application/json") -> None:
+        def _send(
+            self,
+            code: int,
+            body: bytes,
+            content_type: str = "application/json",
+            headers: dict[str, str] | None = None,
+        ) -> None:
             self.send_response(code)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
+            for name, value in (headers or {}).items():
+                self.send_header(name, value)
             self.end_headers()
             if self.command != "HEAD":
                 self.wfile.write(body)
@@ -2301,9 +2338,19 @@ def make_handler(
                         self._send(200, _dumps(_remote_media(source, cfg)))
                         return
                     if source.startswith(("http://", "https://")):
-                        frame, reason = _stream_frame(source, cfg, wanted, frame_width)
+                        frame = cached_frame(source, wanted, frame_width)
+                        reason = ""
+                        approx = False
+                        if not frame:
+                            frame, reason = _stream_frame(source, cfg, wanted, frame_width)
+                        if not frame:
+                            frame = closest_frame(source, wanted, frame_width)
+                            approx = bool(frame)
                         if frame:
-                            self._send(200, frame, "image/jpeg")
+                            self._send(
+                                200, frame, "image/jpeg",
+                                {"X-Frame-Approx": "1"} if approx else None,
+                            )
                             return
                         if reason:
                             self._error(409, reason)
@@ -2335,11 +2382,21 @@ def make_handler(
                 if path == "/api/source":
                     self._serve_media(local)
                     return
-                frame = grab_frame(local, local_time, frame_width)
+                key = str(local)
+                frame = cached_frame(key, local_time, frame_width)
+                approx = False
+                if not frame:
+                    frame = grab_frame(local, local_time, frame_width)
+                if not frame:
+                    # не отдаём пустоту: лучше ближайший кадр, чем исчезнувшая картинка
+                    frame = closest_frame(key, local_time, frame_width)
+                    approx = bool(frame)
                 if not frame:
                     self._error(404, "кадр не получился")
                     return
-                self._send(200, frame, "image/jpeg")
+                self._send(
+                    200, frame, "image/jpeg", {"X-Frame-Approx": "1"} if approx else None
+                )
                 return
             if path == "/api/retention":
                 from .timecode import format_retention

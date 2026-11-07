@@ -11,7 +11,9 @@ import json
 import logging
 import os
 import subprocess
+import threading
 import time
+from collections import OrderedDict
 from fractions import Fraction
 from pathlib import Path
 
@@ -22,6 +24,48 @@ log = logging.getLogger(__name__)
 
 FRAME_TIMEOUT = 25
 STREAM_TTL = 600
+
+# Кадры кэшируем: при быстром перелистывании границы один и тот же кадр
+# запрашивается повторно, а вытащить его из потока — секунды и лишняя нагрузка.
+FRAME_CACHE_LIMIT = 160
+FRAME_FALLBACK_SECONDS = 8.0
+_frame_cache: "OrderedDict[tuple[str, float, int], bytes]" = OrderedDict()
+_frame_lock = threading.Lock()
+# Одновременных извлечений не больше двух: иначе десяток кликов запускает
+# десяток ffmpeg и сайт начинает отказывать.
+_frame_slots = threading.Semaphore(2)
+
+
+def cached_frame(target: str, seconds: float, width: int) -> bytes:
+    with _frame_lock:
+        data = _frame_cache.get((target, round(seconds, 2), width))
+        if data:
+            _frame_cache.move_to_end((target, round(seconds, 2), width))
+        return data or b""
+
+
+def remember_frame(target: str, seconds: float, width: int, data: bytes) -> None:
+    if not data:
+        return
+    key = (target, round(seconds, 2), width)
+    with _frame_lock:
+        _frame_cache[key] = data
+        _frame_cache.move_to_end(key)
+        while len(_frame_cache) > FRAME_CACHE_LIMIT:
+            _frame_cache.popitem(last=False)
+
+
+def closest_frame(target: str, seconds: float, width: int) -> bytes:
+    """Ближайший уже добытый кадр — чтобы картинка не пропадала при сбое."""
+    best, best_gap = None, None
+    with _frame_lock:
+        for (stored, when, stored_width), data in _frame_cache.items():
+            if stored != target or stored_width != width:
+                continue
+            gap = abs(when - seconds)
+            if gap <= FRAME_FALLBACK_SECONDS and (best_gap is None or gap < best_gap):
+                best, best_gap = data, gap
+    return best or b""
 
 # Сколько секунд видео качаем, чтобы показать кадры по ссылке. Двадцать секунд —
 # компромисс: хватает на правку начала и конца короткого клипа, и качается быстро.
@@ -180,7 +224,7 @@ def grab_stream_frame(source: str, cfg: Config, seconds: float, width: int = 480
             bridge_url = bridge.start()
             for key in saved:
                 os.environ[key] = bridge_url
-        return _frame_bytes(url, seconds, width)
+        return _frame_bytes(url, seconds, width, cache_key=source)
     finally:
         for key, value in saved.items():
             if value is None:
@@ -227,7 +271,10 @@ def grab_frame(path: Path, seconds: float, width: int = 480) -> bytes:
     return _frame_bytes(str(path), seconds, width)
 
 
-def _frame_bytes(target: str, seconds: float, width: int = 480) -> bytes:
+def _frame_bytes(
+    target: str, seconds: float, width: int = 480, cache_key: str | None = None
+) -> bytes:
+    key = cache_key or target
     seconds = max(0.0, float(seconds))
     cmd = [
         "ffmpeg", "-hide_banner", "-loglevel", "error",
@@ -238,8 +285,12 @@ def _frame_bytes(target: str, seconds: float, width: int = 480) -> bytes:
         "pipe:1",
     ]
     try:
-        out = subprocess.run(cmd, capture_output=True, timeout=FRAME_TIMEOUT)
+        with _frame_slots:
+            out = subprocess.run(cmd, capture_output=True, timeout=FRAME_TIMEOUT)
     except (OSError, subprocess.SubprocessError) as exc:
         log.info("Кадр не получился (%s, %.2f с): %s", target[:80], seconds, exc)
         return b""
-    return out.stdout if out.stdout[:2] == b"\xff\xd8" else b""
+    data = out.stdout if out.stdout[:2] == b"\xff\xd8" else b""
+    if data:
+        remember_frame(key, seconds, width, data)
+    return data

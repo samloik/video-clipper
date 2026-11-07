@@ -712,6 +712,37 @@ class TestPreview:
         assert headers["Content-Type"] == "image/jpeg"
         assert body[:2] == b"\xff\xd8"
 
+    def test_frame_falls_back_to_the_nearest_cached_one(self, server_factory, cfg, monkeypatch):
+        video = self._video(cfg)
+        base = server_factory(fake_clipper(cfg.output_dir / "c.mp4"))
+        url = base + "/api/frame?source=" + quote(str(video), safe="")
+
+        first_status, first_body, _ = _get(url + "&t=1.0&w=200")
+        assert first_status == 200
+        # извлечение ломается — сервер должен отдать ближайший уже добытый кадр
+        import video_clipper.gui as gui_module
+
+        monkeypatch.setattr(gui_module, "grab_frame", lambda *a, **kw: b"")
+        status, body, headers = _get(url + "&t=1.6&w=200")
+        assert status == 200
+        assert headers["X-Frame-Approx"] == "1"
+        assert body == first_body
+
+    def test_cached_frame_is_served_without_extraction(self, server_factory, cfg, monkeypatch):
+        video = self._video(cfg)
+        base = server_factory(fake_clipper(cfg.output_dir / "c.mp4"))
+        url = base + "/api/frame?source=" + quote(str(video), safe="")
+        _get(url + "&t=1.0&w=200")
+        calls = []
+        import video_clipper.gui as gui_module
+
+        monkeypatch.setattr(
+            gui_module, "grab_frame",
+            lambda *a, **kw: calls.append(a) or b"",
+        )
+        status, body, _ = _get(url + "&t=1.0&w=200")
+        assert status == 200 and not calls
+
     def test_bad_time_is_rejected(self, server_factory, cfg):
         video = self._video(cfg)
         base = server_factory(fake_clipper(cfg.output_dir / "c.mp4"))

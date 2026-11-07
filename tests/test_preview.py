@@ -10,11 +10,15 @@ import pytest
 
 from video_clipper.config import load_config
 from video_clipper.preview import (
+    FRAME_CACHE_LIMIT,
+    cached_frame,
+    closest_frame,
     ensure_window,
     find_window,
     grab_frame,
     local_source,
     probe_media,
+    remember_frame,
     resolve_for_time,
     stream_info,
     windows_dir,
@@ -209,6 +213,32 @@ class TestStream:
         monkeypatch.setattr(source_module, "_ytdlp_extract", lambda url, opts: {"title": "x"})
         with pytest.raises(RuntimeError, match="прямую ссылку"):
             stream_info("https://youtu.be/STREAM3", self._cfg(tmp_path))
+
+
+class TestFrameCache:
+    """Частые клики не должны оставлять пустую рамку."""
+
+    def test_remembered_frame_is_returned(self):
+        remember_frame("ключ-1", 10.0, 360, b"jpeg")
+        assert cached_frame("ключ-1", 10.0, 360) == b"jpeg"
+        assert cached_frame("ключ-1", 10.0, 320) == b""
+
+    def test_closest_frame_within_tolerance(self):
+        remember_frame("ключ-2", 10.0, 360, b"ten")
+        remember_frame("ключ-2", 30.0, 360, b"thirty")
+        assert closest_frame("ключ-2", 11.5, 360) == b"ten"
+        assert closest_frame("ключ-2", 29.0, 360) == b"thirty"
+        assert closest_frame("ключ-2", 60.0, 360) == b""
+
+    def test_cache_keeps_the_oldest_out(self):
+        for index in range(FRAME_CACHE_LIMIT + 5):
+            remember_frame("ключ-3", float(index), 360, b"x")
+        assert cached_frame("ключ-3", 0.0, 360) == b""
+        assert cached_frame("ключ-3", float(FRAME_CACHE_LIMIT + 4), 360) == b"x"
+
+    def test_other_sources_do_not_mix(self, tmp_path):
+        remember_frame("ключ-4", 5.0, 360, b"own")
+        assert closest_frame("ключ-5", 5.0, 360) == b""
 
 
 class TestLocalSource:
