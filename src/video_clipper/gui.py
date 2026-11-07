@@ -1834,6 +1834,22 @@ def _media_duration(source: str, cfg: Config) -> dict:
     }
 
 
+# Причины, при которых скачивать участок бессмысленно: видео нет, доступ закрыт
+# или ссылка битая. Иначе сервис тратит минуту на заведомо провальные попытки.
+PERMANENT_REASON_SIGNS = (
+    "видео недоступно",
+    "не робот",
+    "символов id",
+    "приклеился лишний",
+    "скопирована не целиком",
+)
+
+
+def _reason_is_permanent(reason: str) -> bool:
+    text = (reason or "").lower()
+    return any(sign in text for sign in PERMANENT_REASON_SIGNS)
+
+
 def _frame_from_window(source: str, cfg: Config, seconds: float, width: int) -> bytes:
     """Кадр из короткого скачанного участка — страховка, когда поток медленный."""
     try:
@@ -2656,7 +2672,8 @@ def make_handler(
                         # поток не дал кадр (медленный CDN): короткий участок качаем
                         # сами, чтобы человеку не приходилось нажимать «скачать 20 с».
                         # Но не дольше общего бюджета: ждать кадр минутами нельзя.
-                        if time.monotonic() - began < FRAME_TOTAL_BUDGET:
+                        if (not _reason_is_permanent(reason)
+                                and time.monotonic() - began < FRAME_TOTAL_BUDGET):
                             frame = _frame_from_window(source, cfg, wanted, frame_width)
                         if frame:
                             self._send(200, frame, "image/jpeg")

@@ -481,6 +481,40 @@ class TestUnavailableVideo:
         assert len(calls) == 1, "после «недоступно» других клиентов не пробуем"
 
 
+class TestPermanentReasons:
+    """Если видео нет — участок не качаем: минута на заведомый провал не нужна."""
+
+    REASON = ("видео недоступно: приватное, удалённое или ссылка неверна. "
+              "Открой её в браузере")
+
+    def test_window_is_not_downloaded(self, server_factory, cfg, monkeypatch):
+        import video_clipper.gui as gui_module
+
+        calls = []
+        monkeypatch.setattr(
+            gui_module, "_remote_media",
+            lambda source, cfg_: {"duration": 0.0, "needs_download": True, "window": False,
+                                  "link_problem": ""},
+        )
+        monkeypatch.setattr(gui_module, "_stream_frame", lambda *a: (b"", self.REASON))
+        monkeypatch.setattr(gui_module, "ensure_window",
+                            lambda *a, **k: calls.append(1))
+        base = server_factory(fake_clipper(cfg.output_dir / "c.mp4"))
+        status, body, _ = _get(
+            base + "/api/frame?source=https://youtu.be/DEADVIDEO01&t=0"
+        )
+        assert status == 409
+        assert "видео недоступно" in json.loads(body)["error"]
+        assert calls == [], "закрытое видео не повод качать участок"
+
+    def test_permanent_signs(self):
+        import video_clipper.gui as gui_module
+
+        assert gui_module._reason_is_permanent(self.REASON)
+        assert gui_module._reason_is_permanent("в ссылке 10 символов id вместо 11")
+        assert not gui_module._reason_is_permanent("кадр из потока не пришёл вовремя")
+
+
 class TestDurationEndpoint:
     """Длительность по запросу: шаг «− кадр» от «до конца» без неё не работает."""
 
