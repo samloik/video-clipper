@@ -36,6 +36,11 @@ def no_metadata_network(monkeypatch):
     source_module._META_CACHE.clear()
 
 
+def _clean_config(**overrides):
+    """Конфиг только из кодовых значений: тесты не должны зависеть от config.json."""
+    cfg = load_config(Path("/nonexistent/video-clipper-config.json"))
+    return cfg.with_overrides(**overrides) if overrides else cfg
+
 class TestSendPolicy:
     def _big_file(self, tmp_path, size=1000) -> Path:
         path = tmp_path / "clip.mp4"
@@ -472,7 +477,7 @@ class FakeBot:
 
 
 def _cfg(tmp_path: Path, chats: tuple[int, ...] = ()):
-    return load_config(None).with_overrides(
+    return _clean_config().with_overrides(
         cache_dir=tmp_path / "cache",
         output_dir=tmp_path / "out",
         retention_minutes=30,

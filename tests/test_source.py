@@ -22,6 +22,12 @@ from video_clipper.source import (
     prepare_source,
 )
 
+def _clean_config(**overrides):
+    """Конфиг только из кодовых значений: тесты не должны зависеть от config.json."""
+    cfg = load_config(Path("/nonexistent/video-clipper-config.json"))
+    return cfg.with_overrides(**overrides) if overrides else cfg
+
+
 pytestmark = pytest.mark.skipif(
     subprocess.run(["which", "ffmpeg"], capture_output=True).returncode != 0,
     reason="нужен ffmpeg",
@@ -57,7 +63,7 @@ class TestIsUrl:
 
 class TestLocalSource:
     def test_reads_media_info(self, sample_video):
-        src = prepare_source(str(sample_video), load_config(None))
+        src = prepare_source(str(sample_video), _clean_config())
         assert isinstance(src, Source)
         assert src.is_temporary is False
         assert src.info.has_video and src.info.has_audio
@@ -65,14 +71,14 @@ class TestLocalSource:
 
     def test_missing_file(self, tmp_path):
         with pytest.raises(FileNotFoundError):
-            prepare_source(str(tmp_path / "nope.mp4"), load_config(None))
+            prepare_source(str(tmp_path / "nope.mp4"), _clean_config())
 
 
 class TestCookieHints:
     def test_hint_added_for_signin_error(self, tmp_path):
         from video_clipper.source import _with_cookie_hint
 
-        cfg = load_config(None).with_overrides(cookies=str(tmp_path / "c.txt"))
+        cfg = _clean_config().with_overrides(cookies=str(tmp_path / "c.txt"))
         msg = _with_cookie_hint(
             RuntimeError("ERROR: [youtube] x: Sign in to confirm you're not a bot"), cfg
         )
@@ -82,7 +88,7 @@ class TestCookieHints:
     def test_plain_error_untouched(self):
         from video_clipper.source import _with_cookie_hint
 
-        msg = _with_cookie_hint(RuntimeError("network unreachable"), load_config(None))
+        msg = _with_cookie_hint(RuntimeError("network unreachable"), _clean_config())
         assert msg == "network unreachable"
 
     def test_stale_cookie_warning(self, tmp_path, caplog):
@@ -95,7 +101,7 @@ class TestCookieHints:
         path.write_text("# Netscape HTTP Cookie File\n", encoding="utf-8")
         old = _time.time() - 40 * 86400
         os.utime(path, (old, old))
-        cfg = load_config(None).with_overrides(cookies=str(path))
+        cfg = _clean_config().with_overrides(cookies=str(path))
         with caplog.at_level("WARNING"):
             cookie_warning(cfg)
         assert "не менялся" in caplog.text
@@ -105,7 +111,7 @@ class TestCookieHints:
 
         path = tmp_path / "cookies.txt"
         path.write_text("# Netscape HTTP Cookie File\n", encoding="utf-8")
-        cfg = load_config(None).with_overrides(cookies=str(path))
+        cfg = _clean_config().with_overrides(cookies=str(path))
         with caplog.at_level("WARNING"):
             cookie_warning(cfg)
         assert caplog.text == ""
@@ -135,7 +141,7 @@ class TestChallengeCooldown:
     def test_second_attempt_is_refused_without_touching_the_network(self, tmp_path):
         from video_clipper import source as source_module
 
-        cfg = load_config(None).with_overrides(cache_dir=tmp_path / "cache")
+        cfg = _clean_config().with_overrides(cache_dir=tmp_path / "cache")
         until = source_module.note_challenge(600)
         calls = []
 
@@ -153,7 +159,7 @@ class TestChallengeCooldown:
     def test_cooldown_expires(self, tmp_path):
         from video_clipper import source as source_module
 
-        cfg = load_config(None).with_overrides(cache_dir=tmp_path / "cache")
+        cfg = _clean_config().with_overrides(cache_dir=tmp_path / "cache")
         source_module.note_challenge(0.01)
         time.sleep(0.05)
         assert source_module.challenge_until() < time.time()
@@ -220,7 +226,7 @@ class TestExplainError:
         if age_days is not None:
             stamp = time.time() - age_days * 86400
             os.utime(path, (stamp, stamp))
-        return load_config(None).with_overrides(cookies=str(path))
+        return _clean_config().with_overrides(cookies=str(path))
 
     def test_bot_check_with_fresh_cookies_does_not_blame_cookies(self, tmp_path):
         text = explain_error(RuntimeError("Sign in to confirm you're not a bot"), self._cfg(tmp_path, 0.2))
@@ -232,7 +238,7 @@ class TestExplainError:
         assert "не менялся 60 дн." in text
 
     def test_bot_check_without_file_says_so(self, tmp_path):
-        cfg = load_config(None).with_overrides(cookies=str(tmp_path / "нет.txt"))
+        cfg = _clean_config().with_overrides(cookies=str(tmp_path / "нет.txt"))
         assert "файла cookies нет" in explain_error(RuntimeError("not a bot"), cfg)
 
     def test_ordinary_error_stays_ordinary(self, tmp_path):
@@ -300,7 +306,7 @@ class TestDownload:
                 return {"duration": 600}
             return {"requested_downloads": [{"filepath": str(sample_video)}]}
 
-        cfg = load_config(None).with_overrides(cache_dir=tmp_path / "cache")
+        cfg = _clean_config().with_overrides(cache_dir=tmp_path / "cache")
         prepare_source("https://youtu.be/x", cfg, segments=[(10, 20)], downloader=fake_downloader)
         assert "download_ranges" in seen[-1]
 
@@ -310,7 +316,7 @@ class TestDownload:
                 return {"duration": 30}
             return {"requested_downloads": [{"filepath": str(sample_video)}]}
 
-        cfg = load_config(None).with_overrides(cache_dir=tmp_path / "cache")
+        cfg = _clean_config().with_overrides(cache_dir=tmp_path / "cache")
         src = prepare_source("https://youtu.be/x", cfg, segments=[(0, 28)], downloader=fake_downloader)
         assert src.path == sample_video
 
@@ -324,7 +330,7 @@ class TestDownload:
                 return {"duration": 152 * 60}
             raise RuntimeError("Sign in to confirm you're not a bot")
 
-        cfg = load_config(None).with_overrides(cache_dir=tmp_path / "cache")
+        cfg = _clean_config().with_overrides(cache_dir=tmp_path / "cache")
         with pytest.raises(SourceError, match="Полную загрузку не начинаю"):
             prepare_source("https://youtu.be/x", cfg, segments=[(0, 20)], downloader=downloader)
         downloads = [opts for opts in attempts if not opts.get("skip_download")]
@@ -344,7 +350,7 @@ class TestDownload:
                 hook({"status": "finished"})
             return {"requested_downloads": [{"filepath": str(sample_video)}]}
 
-        cfg = load_config(None).with_overrides(cache_dir=tmp_path / "cache")
+        cfg = _clean_config().with_overrides(cache_dir=tmp_path / "cache")
         prepare_source(
             "https://youtu.be/x",
             cfg,
@@ -366,7 +372,7 @@ class TestDownload:
                 return {"duration": 10.0, "title": "короткий"}
             raise AssertionError("скачивание не должно было начаться")
 
-        cfg = load_config(None).with_overrides(cache_dir=tmp_path / "cache")
+        cfg = _clean_config().with_overrides(cache_dir=tmp_path / "cache")
         with pytest.raises(SourceError, match="выходит за конец ролика"):
             prepare_source("https://youtu.be/x", cfg, segments=[(0, 20)], downloader=downloader)
         assert calls == [True], "был только запрос метаданных"
@@ -376,7 +382,7 @@ class TestDownload:
             raise RuntimeError("boom")
 
         with pytest.raises(SourceError, match="Не удалось скачать"):
-            prepare_source("https://youtu.be/x", load_config(None), downloader=broken)
+            prepare_source("https://youtu.be/x", _clean_config(), downloader=broken)
 
     def test_missing_filepath_is_reported(self):
         def no_path(url, opts):
@@ -385,7 +391,7 @@ class TestDownload:
             return {"title": "x"}
 
         with pytest.raises(SourceError, match="путь к файлу"):
-            prepare_source("https://youtu.be/x", load_config(None), downloader=no_path)
+            prepare_source("https://youtu.be/x", _clean_config(), downloader=no_path)
 
     def test_keep_source_flag(self, sample_video, tmp_path):
         def fake_downloader(url, opts):
@@ -393,7 +399,7 @@ class TestDownload:
                 return {"duration": 10}
             return {"requested_downloads": [{"filepath": str(sample_video)}]}
 
-        cfg = load_config(None).with_overrides(cache_dir=tmp_path / "cache")
+        cfg = _clean_config().with_overrides(cache_dir=tmp_path / "cache")
         src = prepare_source("https://youtu.be/x", cfg, keep_source=True, downloader=fake_downloader)
         assert src.is_temporary is False
         src.cleanup()  # must not delete anything

@@ -19,12 +19,17 @@ from video_clipper.segments import Segment
 
 @pytest.fixture()
 def cfg(tmp_path):
-    return load_config(None).with_overrides(
+    return _clean_config().with_overrides(
         output_dir=tmp_path / "out",
         cache_dir=tmp_path / "cache",
         log_file=tmp_path / "log.txt",
     )
 
+
+def _clean_config(**overrides):
+    """Конфиг только из кодовых значений: тесты не должны зависеть от config.json."""
+    cfg = load_config(Path("/nonexistent/video-clipper-config.json"))
+    return cfg.with_overrides(**overrides) if overrides else cfg
 
 @pytest.fixture()
 def server_factory(cfg, tmp_path):
