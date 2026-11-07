@@ -446,6 +446,33 @@ class TestOpenEnd:
         assert seen["open_ends"] == [True]
 
 
+class TestDurationEndpoint:
+    """Длительность по запросу: шаг «− кадр» от «до конца» без неё не работает."""
+
+    def test_file_duration_comes_from_the_file(self, server_factory, cfg, ten_seconds):
+        base = server_factory(fake_clipper(cfg.output_dir / "c.mp4"))
+        status, body, _ = _get(
+            base + "/api/duration?source=" + quote(str(ten_seconds), safe="")
+        )
+        assert status == 200
+        assert json.loads(body)["duration"] == pytest.approx(10.0, abs=0.3)
+
+    def test_broken_link_is_named_without_going_to_the_network(self, server_factory, cfg):
+        base = server_factory(fake_clipper(cfg.output_dir / "c.mp4"))
+        status, body, _ = _get(
+            base + "/api/duration?source=" + quote("https://youtu.be/-Q5yL7tnq", safe="")
+        )
+        assert status == 409
+        assert "9 символов" in json.loads(body)["error"]
+
+    def test_page_asks_for_duration_and_marks_the_last_frame(self):
+        from video_clipper.gui import PAGE
+
+        assert "/api/duration?source=" in PAGE
+        assert "«До конца» заменено на точный конец" in PAGE
+        assert "последний кадр ролика" in PAGE
+
+
 class TestFrameBudget:
     """Кадр по ссылке не должен держать человека минутами."""
 

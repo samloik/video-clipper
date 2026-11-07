@@ -229,6 +229,35 @@ class TestStream:
         stream_info(url, cfg)
         assert cached_stream(url)["duration"] == 3458.0
 
+    def test_two_requests_for_one_source_extract_once(self, tmp_path, monkeypatch):
+        """Две рамки просят поток одновременно — запрос к сайту должен быть один."""
+        import threading
+        import time
+
+        import video_clipper.source as source_module
+
+        calls = []
+
+        def slow(url, opts):
+            calls.append(1)
+            time.sleep(0.2)
+            return {"url": "https://cdn.example/one.mp4", "duration": 10.0,
+                    "width": 320, "height": 180, "fps": 25.0}
+
+        monkeypatch.setattr(source_module, "_ytdlp_extract", slow)
+        cfg = self._cfg(tmp_path)
+        results = []
+        threads = [
+            threading.Thread(target=lambda: results.append(stream_info("https://youtu.be/ONE1", cfg)))
+            for _ in range(2)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        assert len(calls) == 1, "второй поток берёт уже полученный адрес"
+        assert len(results) == 2
+
     def test_missing_small_format_falls_back_to_any(self, tmp_path, monkeypatch):
         """«Requested format is not available» — не приговор: просим любой формат."""
         import video_clipper.source as source_module

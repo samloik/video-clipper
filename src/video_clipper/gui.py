@@ -708,6 +708,7 @@ function setStatus(text, kind) {
 
 const panelEl = $('panel'), panelText = $('panel-text');
 const progressEl = $('progress'), barEl = $('bar'), etaEl = $('eta');
+let durationPending = false;
 
 function fmtSeconds(value) {
   const s = Math.round(value);
@@ -1160,7 +1161,7 @@ function frameUrl(tc) {
     '&t=' + t.toFixed(3) + '&w=360&_=' + Date.now();
 }
 
-async function loadFrame(img, tc, onMissing, noteEl) {
+async function loadFrame(img, tc, onMissing, noteEl, suffix) {
   // Ответы на частые клики приходят вперемешку: номер запроса не даёт
   // устаревшему кадру перебить свежий и стереть уже показанную картинку.
   const seq = String(Number(img.dataset.seq || 0) + 1);
@@ -1223,7 +1224,7 @@ async function loadFrame(img, tc, onMissing, noteEl) {
       if (previous && previous !== local) URL.revokeObjectURL(previous);
       img.onload = null;
     };
-    mark(res.headers.get('X-Frame-Approx') ? '· ближайший кадр' : '');
+    mark(res.headers.get('X-Frame-Approx') ? '· ближайший кадр' : (suffix || ''));
   } catch (err) {
     mark('· кадр не получен');
     if (onMissing) onMissing('');
@@ -1263,10 +1264,27 @@ function refreshThumbs() {
     loadFrame($('thumb-start'), start || '0', missing, $('note-start'));
   }
   if (endSec === null) {
-    const endImg = $('thumb-end');
-    endImg.removeAttribute('src');
-    endImg.alt = 'конец не задан';
-    $('note-end').textContent = '';
+    if (end === '*') {
+      // «до конца»: показываем последний кадр ролика, а не пустую рамку
+      if (mediaInfo && mediaInfo.duration) {
+        const last = Math.max(0, mediaInfo.duration - 0.1);
+        loadFrame($('thumb-end'), fmtTC(last), missing, $('note-end'), '· последний кадр ролика');
+      } else {
+        $('note-end').textContent = '· длительность ещё не знаю';
+        if (!durationPending && source) {
+          durationPending = true;
+          durationOf(source).then((d) => {
+            durationPending = false;
+            if (d) loadMedia();
+          });
+        }
+      }
+    } else {
+      const endImg = $('thumb-end');
+      endImg.removeAttribute('src');
+      endImg.alt = 'конец не задан';
+      $('note-end').textContent = '';
+    }
   } else if (beyond(endSec)) {
     $('note-end').textContent = '· за концом ролика (' + fmtTC(mediaInfo.duration) + ')';
   } else {
@@ -1365,29 +1383,65 @@ urlEl.addEventListener('input', schedulePreview);
 [$('start'), $('end')].forEach(el => el.addEventListener('input', schedulePreview));
 urlEl.addEventListener('blur', schedulePreview);
 
-function stepField(field, delta) {
+async function durationOf(source) {
+  if (mediaInfo && mediaInfo.duration) return mediaInfo.duration;
+  try {
+    const res = await fetch('/api/duration?source=' + encodeURIComponent(source));
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'сайт не сказал длительность');
+    mediaInfo = Object.assign(mediaInfo || {}, data);
+    return data.duration || 0;
+  } catch (err) {
+    setStatus('Не удалось узнать длительность: ' + err.message, 'err');
+    return 0;
+  }
+}
+
+async function stepField(field, delta) {
   const input = field === 'end' ? $('end') : $('start');
   const raw = input.value.trim();
-  let base = raw === '*' ? 0 : toSeconds(raw || '0');
-  if (!Number.isFinite(base)) return;
+  let base;
+  let fromEnd = false;
   if (raw === '*') {
-    // «до конца» шагать не от чего: подставляем длительность ролика, если она известна
-    if (field !== 'end' || !(mediaInfo && mediaInfo.duration)) {
-      setStatus('Конец стоит «до конца» — впиши точное время, тогда шаг сработает', 'err');
+    // «до конца» — шагать не от чего, пока не знаем длительность ролика
+    if (field !== 'end') {
+      setStatus('В начале «до конца» не бывает — впиши время', 'err');
       return;
     }
-    base = mediaInfo.duration;
+    const source = currentSource();
+    if (!source) { setStatus('Сначала выбери файл или ссылку', 'err'); return; }
+    setStatus('Узнаю длительность ролика…', 'busy');
+    const duration = await durationOf(source);
+    if (!duration) {
+      setStatus('Длительность неизвестна — впиши конец вручную', 'err');
+      return;
+    }
+    base = duration;
+    fromEnd = true;
+  } else {
+    base = toSeconds(raw || '0');
+    if (!Number.isFinite(base)) return;
   }
+  const known = (mediaInfo && mediaInfo.duration) || 0;
   let next = Math.max(0, base + delta);
+  if (known && next > known) next = known;
   const startSec = toSeconds($('start').value.trim() || '0');
   if (field === 'end' && next <= startSec) {
     next = startSec + Math.abs(delta) || startSec + frameStep();
     setStatus('Конец раньше начала не бывает — поставил ' + fmtTC(next), 'err');
+  } else if (next === base && delta > 0) {
+    setStatus('Конец уже в конце ролика — дальше некуда, шагай назад', 'err');
+    return;
   }
   input.value = fmtTC(next);
   syncPreset();
   schedulePreview();
-  setStatus('Правлю ' + (field === 'end' ? 'конец' : 'начало') + ': ' + input.value);
+  if (fromEnd) {
+    setStatus('«До конца» заменено на точный конец: ' + input.value +
+      ' (ролик длится ' + fmtTC(known) + ')');
+  } else {
+    setStatus('Правлю ' + (field === 'end' ? 'конец' : 'начало') + ': ' + input.value);
+  }
 }
 
 document.querySelectorAll('.preview .stepper').forEach(box => {
@@ -1746,6 +1800,26 @@ def _stream_frame(source: str, cfg: Config, seconds: float, width: int):
     if not frame:
         return b"", "кадр из потока не пришёл вовремя"
     return frame, ""
+
+
+def _media_duration(source: str, cfg: Config) -> dict:
+    """Длительность и размеры источника: файл — из файла, ссылка — из потока."""
+    if not source.startswith(("http://", "https://")):
+        return probe_media(Path(source).expanduser())
+    stream = cached_stream(source)
+    if not stream.get("duration"):
+        try:
+            _, meta = stream_info(source, cfg)
+            stream = meta or {}
+        except Exception as exc:  # noqa: BLE001 - причина уйдёт в ответ
+            log.info("Длительность для шага не получена: %s", str(exc)[:120])
+            raise
+    return {
+        "duration": float(stream.get("duration") or 0.0),
+        "width": int(stream.get("width") or 0),
+        "height": int(stream.get("height") or 0),
+        "fps": float(stream.get("fps") or 0.0),
+    }
 
 
 def _frame_from_window(source: str, cfg: Config, seconds: float, width: int) -> bytes:
@@ -2496,6 +2570,27 @@ def make_handler(
                         }
                     ),
                 )
+                return
+            if path == "/api/duration":
+                # Нужен шагу «− кадр» от «до конца»: чтобы сдвинуть конец, надо знать
+                # длительность ролика, даже если кадры ещё не запрашивались.
+                source = (parse_qs(urlparse(self.path).query).get("source") or [""])[0]
+                if not source:
+                    self._error(400, "не указан источник")
+                    return
+                broken = link_problem(source)
+                if broken:
+                    self._error(409, broken)
+                    return
+                try:
+                    info = _media_duration(source, cfg)
+                except Exception as exc:  # noqa: BLE001 - сеть, бот-чек, битая ссылка
+                    self._error(409, _preview_error(exc))
+                    return
+                if not info.get("duration"):
+                    self._error(409, "сайт не сказал длительность ролика")
+                    return
+                self._send(200, _dumps(info))
                 return
             if path in ("/api/media", "/api/frame", "/api/source"):
                 query = parse_qs(urlparse(self.path).query)

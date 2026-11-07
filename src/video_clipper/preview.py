@@ -222,6 +222,19 @@ def resolve_for_time(source: str, cfg: Config, seconds: float):
 
 
 _STREAM_CACHE: dict[str, tuple[float, str, dict]] = {}
+# Две вкладки-рамки просят кадры одновременно. Если пускать их наперегонки,
+# они душат друг друга на прокси и обе не успевают: берём по одному.
+_STREAM_LOCKS: dict[str, threading.Lock] = {}
+_STREAM_LOCKS_GUARD = threading.Lock()
+_REMOTE_FRAME_LOCK = threading.Lock()
+
+
+def _source_lock(source: str) -> threading.Lock:
+    with _STREAM_LOCKS_GUARD:
+        lock = _STREAM_LOCKS.get(source)
+        if lock is None:
+            lock = _STREAM_LOCKS[source] = threading.Lock()
+        return lock
 
 
 def stream_info(source: str, cfg: Config) -> tuple[str, dict]:
@@ -230,6 +243,11 @@ def stream_info(source: str, cfg: Config) -> tuple[str, dict]:
     Сайт отдаёт временный URL на CDN; он живёт ограниченное время, поэтому
     кэшируем недолго. Метаданные (длительность, размеры) приходят оттуда же.
     """
+    with _source_lock(source):
+        return _stream_info_locked(source, cfg)
+
+
+def _stream_info_locked(source: str, cfg: Config) -> tuple[str, dict]:
     cached = _STREAM_CACHE.get(source)
     if cached and time.time() - cached[0] < STREAM_TTL:
         return cached[1], cached[2]
@@ -319,14 +337,15 @@ def grab_stream_frame(source: str, cfg: Config, seconds: float, width: int = 480
                 bridge_url = bridge.start()
                 for key in saved:
                     os.environ[key] = bridge_url
-            return _frame_bytes(
-                url,
-                seconds,
-                width,
-                cache_key=source,
-                user_agent=meta.get("user_agent", ""),
-                timeout=STREAM_FRAME_TIMEOUT,
-            )
+            with _REMOTE_FRAME_LOCK:
+                return _frame_bytes(
+                    url,
+                    seconds,
+                    width,
+                    cache_key=source,
+                    user_agent=meta.get("user_agent", ""),
+                    timeout=STREAM_FRAME_TIMEOUT,
+                )
         finally:
             for key, value in saved.items():
                 if value is None:
