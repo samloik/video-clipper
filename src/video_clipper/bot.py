@@ -81,7 +81,8 @@ https://youtu.be/ID 0:10-0:20
   /id       chat_id для конфига
 
 ОГРАНИЧЕНИЯ
-  Telegram принимает файлы до 50 МБ — больший клип бот не отправит.
+  Telegram принимает файлы до 50 МБ — больший клип бот режет на части без
+  пересжатия (качество не меняется) и присылает их по очереди с пометкой «часть i/n».
   Режется один ролик за раз, следующие ждут в очереди.
   Файлы живут retention_minutes (обычно 30 минут) после последнего использования.
   Если YouTube требует подтверждение (бот-чек), бот делает паузу и повторяет
@@ -287,28 +288,71 @@ WORK_SLOT = threading.Semaphore(1)
 FFMPEG_TIMEOUT = 1800
 
 
-def send_video_smart(bot, chat_id: int, path: Path, caption: str, has_audio: bool = True,
-                     reply_markup: dict | None = None) -> None:
-    """Send a video, shrinking it first when Telegram would refuse it."""
-    from .cut import TELEGRAM_LIMIT_BYTES, shrink_to_fit
+def send_video_smart(
+    bot,
+    chat_id: int,
+    path: Path,
+    caption: str,
+    has_audio: bool = True,
+    reply_markup: dict | None = None,
+    policy: str = "split",
+    ffmpeg_path: str = "ffmpeg",
+    ffprobe_path: str = "ffprobe",
+) -> None:
+    """Send a video that may exceed the Telegram limit.
+
+    ``policy="split"`` cuts the clip into copy-split parts, so a 1080p clip stays
+    1080p; ``policy="compress"`` keeps the old behaviour and crushes it into the
+    limit. Compression stays as the fallback when splitting is impossible.
+    """
+    from .cut import TELEGRAM_LIMIT_BYTES, shrink_to_fit, split_for_telegram
 
     path = Path(path)
-    if path.stat().st_size > TELEGRAM_LIMIT_BYTES:
-        bot.send_message(
-            chat_id,
-            f"Файл {path.stat().st_size / 1048576:.0f} МБ — больше лимита Telegram, "
-            f"сжимаю до 45 МБ...",
-        )
-        shrunk = path.with_name(path.stem + "_small.mp4")
-        path = shrink_to_fit(
-            path,
-            shrunk,
-            limit_bytes=TELEGRAM_LIMIT_BYTES,
-            has_audio=has_audio,
-            timeout=FFMPEG_TIMEOUT,
-        )
-        caption += " · сжато под лимит"
-    bot.send_video(chat_id, path, caption, reply_markup=reply_markup)
+    size = path.stat().st_size
+    if size <= TELEGRAM_LIMIT_BYTES:
+        bot.send_video(chat_id, path, caption, reply_markup=reply_markup)
+        return
+
+    if policy != "compress":
+        try:
+            parts = split_for_telegram(
+                path,
+                path.parent,
+                ffmpeg_path=ffmpeg_path,
+                ffprobe_path=ffprobe_path,
+                timeout=FFMPEG_TIMEOUT,
+            )
+        except Exception as exc:  # noqa: BLE001 — splitting is an optimisation
+            log.warning("Разрезать без пересжатия не вышло (%s) — сжимаю", exc)
+            parts = [path]
+        if len(parts) > 1:
+            bot.send_message(
+                chat_id,
+                f"Клип {size / 1048576:.0f} МБ — больше лимита Telegram. Отправляю "
+                f"{len(parts)} частями без пересжатия, качество не теряется.",
+            )
+            for index, part in enumerate(parts, 1):
+                bot.send_video(
+                    chat_id,
+                    part,
+                    f"{caption} · часть {index}/{len(parts)}",
+                    reply_markup=reply_markup if index == len(parts) else None,
+                )
+            return
+
+    bot.send_message(
+        chat_id,
+        f"Файл {size / 1048576:.0f} МБ — больше лимита Telegram, сжимаю до 45 МБ...",
+    )
+    shrunk = shrink_to_fit(
+        path,
+        path.with_name(path.stem + "_small.mp4"),
+        limit_bytes=TELEGRAM_LIMIT_BYTES,
+        has_audio=has_audio,
+        ffmpeg_path=ffmpeg_path,
+        timeout=FFMPEG_TIMEOUT,
+    )
+    bot.send_video(chat_id, shrunk, caption + " · сжато под лимит", reply_markup=reply_markup)
 
 
 def run_in_worker(fn, *args) -> None:
@@ -999,6 +1043,9 @@ def handle_message(bot, cfg: Config, message: dict, clipper=None) -> None:
                 caption,
                 has_audio=bool(job.get("has_audio", True)) if job else True,
                 reply_markup=markup,
+                policy=cfg.telegram_policy,
+                ffmpeg_path=cfg.ffmpeg_path,
+                ffprobe_path=cfg.ffprobe_path,
             )
         except TelegramError as exc:
             bot.send_message(chat_id, f"Не смог отправить видео: {exc}")
@@ -1099,6 +1146,9 @@ def handle_callback(bot, cfg: Config, callback: dict) -> None:
                 Path(result.output_path),
                 clip_caption(job.get("title", ""), job.get("source", ""), shown, result.duration),
                 has_audio=bool(job.get("has_audio", True)),
+                policy=cfg.telegram_policy,
+                ffmpeg_path=cfg.ffmpeg_path,
+                ffprobe_path=cfg.ffprobe_path,
             )
             sent += 1
         except TelegramError as exc:

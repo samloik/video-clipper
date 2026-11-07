@@ -36,6 +36,81 @@ def no_metadata_network(monkeypatch):
     source_module._META_CACHE.clear()
 
 
+class TestSendPolicy:
+    def _big_file(self, tmp_path, size=1000) -> Path:
+        path = tmp_path / "clip.mp4"
+        path.write_bytes(b"0" * size)
+        return path
+
+    def test_small_file_is_sent_directly(self, tmp_path, monkeypatch):
+        import video_clipper.bot as botmod
+
+        monkeypatch.setattr("video_clipper.cut.TELEGRAM_LIMIT_BYTES", 10_000)
+        bot = FakeBot()
+        botmod.send_video_smart(bot, 1, self._big_file(tmp_path), "подпись")
+        assert len(bot.videos) == 1
+        assert bot.messages == [], "ничего объяснять не нужно"
+        assert bot.videos[0][2] == "подпись"
+
+    def test_big_file_is_split_not_crushed(self, tmp_path, monkeypatch):
+        import video_clipper.bot as botmod
+
+        parts = []
+        for index in (1, 2, 3):
+            part = tmp_path / f"clip_part{index}.mp4"
+            part.write_bytes(b"0" * 10)
+            parts.append(part)
+
+        monkeypatch.setattr("video_clipper.cut.TELEGRAM_LIMIT_BYTES", 10)
+        monkeypatch.setattr("video_clipper.cut.split_for_telegram", lambda *a, **kw: parts)
+        called = {"shrink": False}
+        monkeypatch.setattr(
+            "video_clipper.cut.shrink_to_fit",
+            lambda *a, **kw: called.__setitem__("shrink", True) or a[1],
+        )
+        bot = FakeBot()
+        botmod.send_video_smart(bot, 1, self._big_file(tmp_path), "подпись", reply_markup={"x": 1})
+        assert called["shrink"] is False, "пересжатие не нужно: клип режется на части"
+        assert len(bot.videos) == 3
+        assert [v[2] for v in bot.videos] == [
+            "подпись · часть 1/3",
+            "подпись · часть 2/3",
+            "подпись · часть 3/3",
+        ]
+        assert bot.markups == [None, None, {"x": 1}], "кнопки — только на последней части"
+        assert any("без пересжатия" in text for _, text in bot.messages)
+
+    def test_splitting_failure_falls_back_to_compression(self, tmp_path, monkeypatch):
+        import video_clipper.bot as botmod
+
+        def broken(*args, **kwargs):
+            raise RuntimeError("ffmpeg не смог")
+
+        monkeypatch.setattr("video_clipper.cut.TELEGRAM_LIMIT_BYTES", 10)
+        monkeypatch.setattr("video_clipper.cut.split_for_telegram", broken)
+        monkeypatch.setattr(
+            "video_clipper.cut.shrink_to_fit", lambda src, out, **kw: Path(out)
+        )
+        bot = FakeBot()
+        botmod.send_video_smart(bot, 1, self._big_file(tmp_path), "подпись")
+        assert len(bot.videos) == 1
+        assert bot.videos[0][2].endswith("сжато под лимит")
+        assert any("сжимаю" in text for _, text in bot.messages)
+
+    def test_compress_policy_skips_splitting(self, tmp_path, monkeypatch):
+        import video_clipper.bot as botmod
+
+        monkeypatch.setattr("video_clipper.cut.TELEGRAM_LIMIT_BYTES", 10)
+        monkeypatch.setattr(
+            "video_clipper.cut.split_for_telegram",
+            lambda *a, **kw: pytest.fail("при policy=compress резать нельзя"),
+        )
+        monkeypatch.setattr("video_clipper.cut.shrink_to_fit", lambda src, out, **kw: Path(out))
+        bot = FakeBot()
+        botmod.send_video_smart(bot, 1, self._big_file(tmp_path), "подпись", policy="compress")
+        assert len(bot.videos) == 1
+
+
 class TestBotCheckRetry:
     def test_bot_check_schedules_a_retry_and_says_why(self, tmp_path, monkeypatch):
         import video_clipper.bot as botmod

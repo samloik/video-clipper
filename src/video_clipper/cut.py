@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import math
 import shutil
 import subprocess
 import tempfile
@@ -178,6 +180,103 @@ def copy_whole(src: str | Path, out: str | Path, ffmpeg_path: str = "ffmpeg",
         source=str(src_path), segment=seg, output_path=out_path,
         duration=seg.duration, mode="whole (копия)", size_bytes=out_path.stat().st_size,
     )
+
+
+def keyframe_times(
+    src: str | Path, ffprobe_path: str = "ffprobe", runner=subprocess.run
+) -> list[float]:
+    """Timestamps of video keyframes: the only legal cut points for copy-splitting.
+
+    Read at packet level: ffprobe 4.4 does not report ``pts_time`` for frames with
+    ``-skip_frame nokey``, while packet flags are always there.
+    """
+    cmd = [
+        ffprobe_path, "-v", "error", "-select_streams", "v:0", "-show_packets",
+        "-show_entries", "packet=pts_time,flags", "-of", "json", str(src),
+    ]
+    proc = runner(cmd, capture_output=True, text=True, check=False)
+    try:
+        packets = json.loads(proc.stdout or "{}").get("packets", [])
+    except ValueError:
+        return []
+    times: list[float] = []
+    for packet in packets:
+        if "K" not in str(packet.get("flags") or ""):
+            continue
+        try:
+            times.append(float(packet.get("pts_time")))
+        except (TypeError, ValueError):
+            continue
+    return sorted(set(times))
+
+
+def split_for_telegram(
+    src: str | Path,
+    out_dir: str | Path,
+    limit_bytes: int = TELEGRAM_LIMIT_BYTES,
+    ffmpeg_path: str = "ffmpeg",
+    ffprobe_path: str = "ffprobe",
+    runner=subprocess.run,
+    timeout: float | None = None,
+    margin: float = 0.9,
+) -> list[Path]:
+    """Split a clip into equal parts under ``limit_bytes`` without re-encoding.
+
+    Copy-splitting keeps the original bitrate: a 1080p clip that does not fit
+    stays 1080p, only cut in two, instead of being crushed to 480p.
+    """
+    src_path = Path(src)
+    out_path_dir = Path(out_dir)
+    out_path_dir.mkdir(parents=True, exist_ok=True)
+    size = src_path.stat().st_size
+    if size <= limit_bytes:
+        return [src_path]
+
+    from .probe import probe_media
+
+    duration = probe_media(str(src_path), ffprobe_path).duration
+    if duration <= 0:
+        raise CutError(f"не удалось определить длительность {src_path.name}")
+
+    budget = limit_bytes * margin
+    count = max(2, math.ceil(size / budget))
+    frames = keyframe_times(src_path, ffprobe_path, runner)
+    if len(frames) < 3:
+        # One keyframe per clip: any copy cut would duplicate the whole video.
+        raise CutError("в клипе почти нет ключевых кадров — резать без пересжатия нельзя")
+
+    # Cut exactly on keyframes: parts neither overlap nor lose a frame.
+    cuts: list[float] = []
+    for index in range(1, count):
+        target = duration * index / count
+        nearest = min(frames, key=lambda t: abs(t - target))
+        if cuts and nearest <= cuts[-1]:
+            continue
+        cuts.append(nearest)
+    boundaries = [0.0, *cuts, duration]
+
+    parts: list[Path] = []
+    for index in range(len(boundaries) - 1):
+        start, end = boundaries[index], boundaries[index + 1]
+        if end - start <= 0.2:
+            continue
+        out = out_path_dir / f"{src_path.stem}_part{index + 1}{src_path.suffix}"
+        cmd = [
+            ffmpeg_path, "-hide_banner", "-nostdin", "-loglevel", "error", "-y",
+            "-ss", f"{start:.3f}", "-i", str(src_path),
+            "-t", f"{end - start:.3f}",
+            "-map", "0", "-c", "copy", "-movflags", "+faststart", str(out),
+        ]
+        proc = runner(cmd, capture_output=True, text=True, check=False, timeout=timeout)
+        if proc.returncode != 0 or not out.is_file() or out.stat().st_size == 0:
+            tail = (proc.stderr or "").strip().splitlines()[-3:]
+            raise CutError(f"не удалось разрезать {src_path.name} на части: " + " | ".join(tail))
+        if out.stat().st_size > limit_bytes:
+            raise CutError(f"часть {out.name} вышла больше лимита Telegram")
+        parts.append(out)
+    if len(parts) < 2:
+        raise CutError("не удалось разделить клип на части")
+    return parts
 
 
 def shrink_to_fit(

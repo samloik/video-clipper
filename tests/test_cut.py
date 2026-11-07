@@ -7,7 +7,14 @@ from pathlib import Path
 
 import pytest
 
-from video_clipper.cut import CutError, build_ffmpeg_command, cut_segment, remove_source
+from video_clipper.cut import (
+    CutError,
+    build_ffmpeg_command,
+    cut_segment,
+    remove_source,
+    split_for_telegram,
+)
+from video_clipper.probe import probe_media
 from video_clipper.segments import Segment
 
 FFMPEG = subprocess.run(["which", "ffmpeg"], capture_output=True).returncode == 0
@@ -175,6 +182,53 @@ class TestWholeAndShrink:
         assert len(calls) == 2
         assert "480" in " ".join(calls[1])
         assert result.stat().st_size == 50
+
+
+@pytest.fixture(scope="module")
+def gop_clip(tmp_path_factory) -> Path:
+    """Ten seconds with a keyframe every 0.4 s — a normal web video looks like this."""
+    path = tmp_path_factory.mktemp("media") / "gop.mp4"
+    subprocess.run(
+        [
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "lavfi", "-i", "testsrc=size=320x240:rate=25:duration=10",
+            "-f", "lavfi", "-i", "sine=frequency=440:duration=10",
+            "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-g", "10",
+            "-c:a", "aac", "-shortest", str(path),
+        ],
+        check=True,
+    )
+    return path
+
+
+class TestSplitForTelegram:
+    def test_small_file_is_returned_as_is(self, gop_clip, tmp_path):
+        assert split_for_telegram(gop_clip, tmp_path, limit_bytes=10_000_000) == [gop_clip]
+
+    def test_big_file_is_split_without_re_encoding(self, gop_clip, tmp_path):
+        ten_seconds = gop_clip
+        limit = ten_seconds.stat().st_size // 3
+        parts = split_for_telegram(ten_seconds, tmp_path / "parts", limit_bytes=limit)
+        assert len(parts) >= 2, parts
+        assert all(part.stat().st_size <= limit for part in parts)
+        total = sum(probe_media(str(part), "ffprobe").duration for part in parts)
+        original = probe_media(str(ten_seconds), "ffprobe").duration
+        # части режутся по ключевым кадрам, поэтому немного перекрываются
+        assert original <= total <= original * 1.5, (total, original)
+        for part in parts:
+            info = probe_media(str(part), "ffprobe")
+            assert (info.width, info.height) == (320, 240), "качество не должно меняться"
+
+    def test_names_are_numbered(self, gop_clip, tmp_path):
+        parts = split_for_telegram(gop_clip, tmp_path, limit_bytes=gop_clip.stat().st_size // 2)
+        assert [p.name for p in parts] == [
+            f"gop_part{i}.mp4" for i in range(1, len(parts) + 1)
+        ]
+
+    def test_clip_without_keyframes_is_refused(self, ten_seconds, tmp_path):
+        """Один ключевой кадр на весь клип: copy-split продублировал бы видео."""
+        with pytest.raises(CutError, match="ключевых кадров"):
+            split_for_telegram(ten_seconds, tmp_path, limit_bytes=ten_seconds.stat().st_size // 3)
 
 
 class TestCutProgress:
