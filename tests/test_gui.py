@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import threading
 import time
@@ -441,6 +442,91 @@ class TestErrorDetails:
 
         assert "job.error_details" in PAGE
         assert "showPanel('Ошибка'" in PAGE
+
+
+class TestDiskAndHistory:
+    def test_status_reports_disk_space(self, server_factory, cfg, tmp_path):
+        base = server_factory(fake_clipper(tmp_path / "c.mp4"))
+        status, body = get(base, "/api/status")
+        text = json.loads(body)["text"]
+        assert "диск: свободно" in text and "ГБ" in text
+
+    def test_health_has_uptime(self, server_factory, tmp_path):
+        base = server_factory(fake_clipper(tmp_path / "c.mp4"))
+        status, body = get(base, "/api/health")
+        assert status == 200
+        data = json.loads(body)
+        assert data["status"] == "ok" and data["uptime_s"] >= 0
+
+    def test_finished_job_is_written_to_history(self, server_factory, cfg, tmp_path):
+        base = server_factory(fake_clipper(tmp_path / "c.mp4"))
+        media = tmp_path / "v.mp4"
+        media.write_bytes(b"x")
+        _, body = post_json(base, "/api/clip", {
+            "source": str(media),
+            "segments": [{"start": "0:00", "end": "0:01"}, {"start": "0:02", "end": "0:03"}],
+            "fast": True,
+        })
+        for _ in range(60):
+            job = json.loads(get(base, f"/api/jobs/{body['job_id']}")[1])
+            if job["state"] != "running":
+                break
+            time.sleep(0.05)
+        history = cfg.history_path()
+        assert history.is_file()
+        entry = json.loads(history.read_text().strip().splitlines()[-1])
+        assert entry["state"] == "done"
+        assert entry["segments"] == 2 and entry["clips"] >= 1
+        assert entry["mode"].startswith("без перекодирования")
+        assert entry["seconds"] >= 0
+
+    def test_history_is_shown_in_status(self, server_factory, cfg, tmp_path):
+        base = server_factory(fake_clipper(tmp_path / "c.mp4"))
+        media = tmp_path / "v.mp4"
+        media.write_bytes(b"x")
+        post_json(base, "/api/clip", {
+            "source": str(media), "segments": [{"start": "0:00", "end": "0:01"}],
+        })
+        for _ in range(60):
+            job_body = get(base, "/api/status")[1]
+            if "последние задания" in json.loads(job_body)["text"]:
+                break
+            time.sleep(0.05)
+        assert "последние задания" in json.loads(job_body)["text"]
+        assert media.name in json.loads(job_body)["text"]
+
+    def test_low_disk_refuses_the_job(self, server_factory, cfg, tmp_path, monkeypatch):
+        monkeypatch.setattr("video_clipper.storage.free_mb", lambda directory: 10.0)
+        base = server_factory(fake_clipper(tmp_path / "c.mp4"))
+        media = tmp_path / "v.mp4"
+        media.write_bytes(b"x")
+        _, body = post_json(base, "/api/clip", {
+            "source": str(media), "segments": [{"start": "0:00", "end": "0:01"}],
+        })
+        for _ in range(60):
+            job = json.loads(get(base, f"/api/jobs/{body['job_id']}")[1])
+            if job["state"] != "running":
+                break
+            time.sleep(0.05)
+        assert job["state"] == "error"
+        assert "Мало места на диске" in job["error_details"]
+        assert "10" in job["error_details"], "в сообщении должно быть сколько свободно"
+
+    def test_make_room_deletes_the_oldest_files(self, tmp_path):
+        from video_clipper.storage import make_room
+
+        cache = tmp_path / "cache"
+        cache.mkdir()
+        old = cache / "old.mp4"
+        old.write_bytes(b"x" * 4096)
+        new = cache / "new.mp4"
+        new.write_bytes(b"x" * 4096)
+        os.utime(old, (1000, 1000))
+        # цель заведомо больше свободного места: удаляем всё, самое старое первым
+        result = make_room([cache], target_mb=10**9)
+        assert old in result.removed
+        assert result.freed_bytes >= 4096
+        assert not old.exists()
 
 
 class TestCancel:

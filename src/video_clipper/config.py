@@ -40,6 +40,10 @@ DEFAULTS: dict[str, Any] = {
     "gui_password_file": None,
     # ключ для cookie-сессий GUI: переживает перезапуск, иначе «запомнить» не работает
     "gui_secret_file": "~/.hermes/video-clipper-gui.secret",
+    # диск: порог отказа и порог, при котором чистим старые файлы сами
+    "min_free_mb": 500,
+    "auto_clean_free_mb": 2000,
+    "history_file": None,
     "gui_port": 8766,
     "log_file": "./video-clipper.log",
 }
@@ -75,6 +79,17 @@ class Config:
     log_file: Path
     # путь к config.json, чтобы рядом хранить сменные настройки (retention.txt)
     config_path: Path | None = None
+    min_free_mb: int = 500
+    auto_clean_free_mb: int = 2000
+    history_file: Path | None = None
+
+    def history_path(self) -> Path | None:
+        """Where finished jobs are recorded (JSONL next to config.json)."""
+        if self.history_file is not None:
+            return self.history_file
+        if self.config_path is None:
+            return None
+        return self.config_path.parent / "history.jsonl"
 
     def retention_file(self) -> Path | None:
         """Where a runtime override of retention_minutes lives."""
@@ -140,6 +155,11 @@ def _from_mapping(data: dict[str, Any]) -> Config:
             else None
         ),
         gui_secret_file=Path(str(merged["gui_secret_file"])).expanduser(),
+        min_free_mb=int(merged["min_free_mb"]),
+        auto_clean_free_mb=int(merged["auto_clean_free_mb"]),
+        history_file=(
+            Path(str(merged["history_file"])).expanduser() if merged["history_file"] else None
+        ),
         gui_port=int(merged["gui_port"]),
         log_file=Path(str(merged["log_file"])).expanduser(),
     )

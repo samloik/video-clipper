@@ -9,5 +9,6 @@ cache/
 *.log
 config.json
 retention.txt
+history.jsonl
 cookies*.txt
 .pytest_cache/

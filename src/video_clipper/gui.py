@@ -41,6 +41,7 @@ from .segments import (
 from .source import is_url
 
 log = logging.getLogger("video_clipper")
+STARTED_AT = time.time()
 
 MAX_UPLOAD = 4 * 1024 * 1024 * 1024  # 4 GB
 # Эстимейт для GUI: локальный файл не надо качать, поэтому накладные меньше.
@@ -1104,6 +1105,31 @@ def _job_control(job_id: str) -> "JobControl | None":
         return control if isinstance(control, JobControl) else None
 
 
+def _free_mb(cfg: Config) -> float:
+    from .storage import free_mb
+
+    return free_mb(Path(cfg.output_dir).expanduser())
+
+
+def _prepare_disk(cfg: Config) -> None:
+    """Make room if the disk is tight; refuse the job when even that is not enough."""
+    from .storage import make_room
+
+    free = _free_mb(cfg)
+    if free < cfg.auto_clean_free_mb:
+        log.info("Свободно %.0f МБ — чищу старые файлы до %d МБ", free, cfg.auto_clean_free_mb)
+        make_room(
+            [Path(cfg.cache_dir).expanduser(), Path(cfg.output_dir).expanduser()],
+            float(cfg.auto_clean_free_mb),
+        )
+        free = _free_mb(cfg)
+    if free < cfg.min_free_mb:
+        raise RuntimeError(
+            f"Мало места на диске: свободно {free:.0f} МБ, нужно хотя бы {cfg.min_free_mb} МБ. "
+            f"Освободи место или нажми «Очистить» — иначе клип запишется битым."
+        )
+
+
 def _estimate(
     source: str, segments: list[Segment], fast: bool, vertical: bool, layout: str
 ) -> tuple[float, float] | None:
@@ -1139,7 +1165,35 @@ def _run_job(
     layout: str = "crop",
 ) -> None:
     control = _job_control(job_id)
+    started = time.monotonic()
+    mode_text = ", ".join(
+        ["без перекодирования" if fast else "точный"]
+        + (["9:16 с размытым фоном" if layout == "blur" else "9:16"] if vertical else [])
+    )
+
+    def finish(state: str, **extra: Any) -> None:
+        """Update the job and append it to history.jsonl."""
+        from .storage import record_history
+
+        payload = extra.get("results") or []
+        entry = {
+            "ts": time.time(),
+            "job": job_id,
+            "source": source,
+            "segments": len(segments),
+            "mode": mode_text,
+            "state": state,
+            "seconds": round(time.monotonic() - started, 1),
+            "clips": len(payload),
+            "bytes": sum(int(item.get("size_bytes") or 0) for item in payload),
+        }
+        if extra.get("error"):
+            entry["error"] = str(extra["error"])[:200]
+        record_history(cfg.history_path(), entry)
+        _job_update(job_id, state=state, **extra)
+
     try:
+        _prepare_disk(cfg)
         from .source import resolve_open_ends_for_source
 
         try:
@@ -1193,9 +1247,7 @@ def _run_job(
                 except TypeError:
                     results = clipper(source, segments, fast, cfg, progress)
         if control is not None and control.is_set():
-            _job_update(
-                job_id, state="cancelled", error="Остановлено", error_details="", message=""
-            )
+            finish(state="cancelled", error="Остановлено", error_details="", message="")
             return
         payload = []
         files = []
@@ -1209,22 +1261,15 @@ def _run_job(
                 }
             )
             files.append(str(res.output_path))
-        _job_update(job_id, state="done", results=payload, files=files, message="")
+        finish(state="done", results=payload, files=files, message="")
     except Exception as exc:  # noqa: BLE001 - reported to the page
         if (control is not None and control.is_set()) or isinstance(exc, CutCancelled):
             log.info("Задание %s остановлено пользователем", job_id)
-            _job_update(
-                job_id,
-                state="cancelled",
-                error="Остановлено",
-                error_details="",
-                message="",
-            )
+            finish(state="cancelled", error="Остановлено", error_details="", message="")
             return
         log.exception("Ошибка задания %s", job_id)
         reason = str(exc) or exc.__class__.__name__
-        _job_update(
-            job_id,
+        finish(
             state="error",
             error=reason.splitlines()[0][:200],
             error_details=(
@@ -1340,6 +1385,36 @@ def status_text(cfg: Config) -> str:
         lines.append("cookies: файла нет — YouTube может требовать авторизацию")
     running = sum(1 for job in JOBS.values() if job.get("state") == "running")
     lines.append(f"в работе: {running} задание(й)")
+    from .storage import free_mb, read_history, total_mb
+
+    out_dir = Path(cfg.output_dir).expanduser()
+    free, total = free_mb(out_dir), total_mb(out_dir)
+    used_percent = round(100 - free / total * 100) if total else 0
+    lines.append(
+        f"диск: свободно {free / 1024:.1f} ГБ из {total / 1024:.1f} ГБ ({used_percent}% занято)"
+    )
+    if free < cfg.auto_clean_free_mb:
+        lines.append(
+            f"  ⚠️ ниже порога {cfg.auto_clean_free_mb} МБ — перед заданием уберу старые файлы"
+        )
+    if free < cfg.min_free_mb:
+        lines.append(f"  ⛔️ меньше {cfg.min_free_mb} МБ — новые задания будут отклонены")
+    history = read_history(cfg.history_path(), 5)
+    if history:
+        lines.append("последние задания:")
+        for item in history:
+            state = {
+                "done": "готово",
+                "error": "ошибка",
+                "cancelled": "остановлено",
+            }.get(str(item.get("state")), str(item.get("state")))
+            source = str(item.get("source") or "")
+            short = Path(source).name if not source.startswith("http") else source[:40]
+            lines.append(
+                f"  · {format_moment(float(item.get('ts') or 0))} — {state}, "
+                f"{item.get('clips', 0)} клип(ов), {item.get('seconds', 0)} с, "
+                f"{item.get('mode', '')} · {short[:40]}"
+            )
     lines.append(
         f"хранение: {format_retention(minutes)} тишины — меняется кнопкой «Хранение»"
     )
@@ -1387,7 +1462,10 @@ GUI_HELP = """Как пользоваться
 Служебное
   Адрес: {url}
   Пароль: {password}
-  «Статус» в шапке — что лежит на машине прямо сейчас."""
+  «Статус» в шапке — что лежит на машине, сколько свободно на диске и что было
+  в последних заданиях (история пишется в history.jsonl рядом с конфигом).
+  Перед заданием проверяется место: при нехватке сначала удаляются самые старые
+  файлы, а если места всё равно мало — задание отклоняется с понятной ошибкой."""
 
 
 def info_text(cfg: Config) -> str:
@@ -1528,7 +1606,10 @@ def make_handler(
             apply_retention_override(cfg)
             path = urlparse(self.path).path
             if path == "/api/health":
-                self._send(200, _dumps({"status": "ok"}))
+                self._send(
+                    200,
+                    _dumps({"status": "ok", "uptime_s": round(time.time() - STARTED_AT)}),
+                )
                 return
             if path == "/login":
                 if not auth_gate.enabled:

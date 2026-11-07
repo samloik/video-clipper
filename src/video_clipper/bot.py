@@ -1044,6 +1044,12 @@ def handle_message(bot, cfg: Config, message: dict, clipper=None) -> None:
         if chat_id in RETRY_AT:
             when = time.strftime("%H:%M", time.localtime(RETRY_AT[chat_id]))
             lines.append(f"Отложен повтор запроса в {when} (держит бот-чек YouTube)")
+        from .storage import free_mb, total_mb
+
+        out_dir = Path(cfg.output_dir).expanduser()
+        free, total = free_mb(out_dir), total_mb(out_dir)
+        used = round(100 - free / total * 100) if total else 0
+        lines.append(f"Диск: свободно {free / 1024:.1f} ГБ из {total / 1024:.1f} ГБ ({used}%)")
         lines.append(
             f"Хранение: {format_retention(cfg.retention_minutes)} тишины; меняется /time"
         )

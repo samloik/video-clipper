@@ -9,8 +9,10 @@ the CLI calls it on start.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
+import shutil
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -101,6 +103,93 @@ def touch(path: Path) -> None:
         path.touch()
     except OSError:  # pragma: no cover
         pass
+
+
+def _probe_path(directory: Path) -> Path:
+    """Nearest existing ancestor: the output dir may not exist until the first clip."""
+    probe = Path(directory)
+    while not probe.exists() and probe != probe.parent:
+        probe = probe.parent
+    return probe
+
+
+def free_mb(directory: Path) -> float:
+    """Free space on the volume holding ``directory``, in megabytes."""
+    try:
+        return round(shutil.disk_usage(_probe_path(directory)).free / 1048576, 1)
+    except OSError:
+        return 0.0
+
+
+def total_mb(directory: Path) -> float:
+    try:
+        return round(shutil.disk_usage(_probe_path(directory)).total / 1048576, 1)
+    except OSError:
+        return 0.0
+
+
+def make_room(dirs: list[Path], target_mb: float) -> "SweepResult":
+    """Delete the oldest files until ``target_mb`` is free again.
+
+    Used before a job when the disk is close to full: better to lose a cached
+    download than to fail halfway through writing a clip.
+    """
+    removed: list[Path] = []
+    freed = 0
+    probe = dirs[0] if dirs else Path(".")
+    if free_mb(probe) >= target_mb:
+        return SweepResult(removed=[], freed_bytes=0)
+    files: list[Path] = []
+    for directory in dirs:
+        if directory and directory.is_dir():
+            files.extend(path for path in directory.rglob("*") if path.is_file())
+    for path in sorted(files, key=lambda p: p.stat().st_mtime):
+        if free_mb(probe) >= target_mb:
+            break
+        try:
+            size = path.stat().st_size
+            path.unlink()
+            removed.append(path)
+            freed += size
+        except OSError:
+            continue
+    if removed:
+        log.info("Мало места: удалил %d старых файлов, освободил %.1f МБ", len(removed), freed / 1048576)
+    return SweepResult(removed=removed, freed_bytes=freed)
+
+
+def record_history(path: Path | None, entry: dict) -> None:
+    """Append one finished job to the JSONL history (best effort)."""
+    if path is None:
+        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except OSError:
+        log.warning("Не смог записать историю задания в %s", path)
+
+
+def read_history(path: Path | None, limit: int = 10) -> list[dict]:
+    """Last ``limit`` finished jobs, newest first."""
+    if path is None or not path.is_file():
+        return []
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    out: list[dict] = []
+    for line in reversed(lines):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            out.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+        if len(out) >= limit:
+            break
+    return out
 
 
 def describe(directory: Path, minutes: int | None = None) -> list[dict[str, object]]:
