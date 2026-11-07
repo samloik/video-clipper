@@ -36,7 +36,13 @@ from pathlib import Path
 from typing import Callable
 
 from .config import Config, apply_retention_override, load_config
-from .segments import Segment, has_open_ends, parse_range_spec, resolve_open_ends
+from .segments import (
+    Segment,
+    has_open_ends,
+    is_open_end,
+    parse_range_spec,
+    resolve_open_ends,
+)
 from .source import ChallengeCooldown, challenge_until, fetch_metadata, is_bot_check, is_url
 from .storage import describe, sweep
 from .timecode import format_moment, format_retention, human_duration, human_timecode
@@ -497,6 +503,9 @@ def clip_for_bot(
         cancel_event=STOP_REQUESTED,
         progress=progress,
     )
+    if has_open_ends(segments):
+        # «11-*» — теперь известна настоящая длительность скачанного файла
+        segments = resolve_open_ends(segments, src.info.duration)
     whole = not segments
     if whole:
         if src.info.duration <= 0:
@@ -642,6 +651,8 @@ ESTIMATE_OVERHEAD = 15.0
 
 def estimate_seconds(request: "Request") -> tuple[float, float] | None:
     """Low and high estimate for the whole job, or None when it is unknowable."""
+    if has_open_ends(request.segments):
+        return None  # конец «до конца ролика» узнается только после загрузки
     total = sum(seg.duration for seg in request.segments)
     if total <= 0:
         return None
@@ -682,6 +693,9 @@ def describe_request(
         lines.append(f"{name} длится {human_duration(duration)}")
     for index, seg in enumerate(request.segments[:limit], 1):
         number = f"{index}. " if count > 1 else ""
+        if is_open_end(seg):
+            lines.append(f"{number}{human_timecode(seg.start)} – до конца ролика")
+            continue
         lines.append(
             f"{number}{human_timecode(seg.start)}–{human_timecode(seg.end)} "
             f"({seg.duration:g} с)"
@@ -1139,14 +1153,13 @@ def handle_message(bot, cfg: Config, message: dict, clipper=None) -> None:
                 duration = probe_media(request.source, cfg.ffprobe_path).duration
             request.segments = resolve_open_ends(request.segments, duration)
         except (ValueError, OSError) as exc:
-            bot.send_message(
-                chat_id,
-                f"Не понял, где конец ролика: {exc}.\n"
-                f"Вместо «*» можно указать точный конец, например 0:10-1:30.",
-            )
-            return
+            # Метаданные не всегда отдают длительность (Shorts, бот-чек) — ничего
+            # страшного: конец подставится по уже скачанному файлу.
+            log.info("Длительность заранее неизвестна (%s), конец определю после загрузки", exc)
     if duration and request.segments:
-        over = [seg for seg in request.segments if seg.end > duration + 0.5]
+        over = [
+            seg for seg in request.segments if not is_open_end(seg) and seg.end > duration + 0.5
+        ]
         if over:
             seg = over[0]
 

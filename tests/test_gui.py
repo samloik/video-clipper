@@ -375,7 +375,7 @@ class TestOpenEnd:
         )
         assert status == 400
 
-    def test_open_end_for_a_url_without_metadata_is_reported_in_the_job(
+    def test_missing_metadata_does_not_kill_the_job(
         self, server_factory, cfg, tmp_path, monkeypatch
     ):
         from video_clipper.source import SourceError
@@ -384,19 +384,29 @@ class TestOpenEnd:
             raise SourceError("нет сети")
 
         monkeypatch.setattr("video_clipper.source.fetch_metadata", boom)
-        base = server_factory(default_clipper)
+        seen = {}
+
+        def clipper(source, segments, fast, cfg, progress=None, vertical=False, layout="crop"):
+            from video_clipper.segments import is_open_end
+
+            seen["open_ends"] = [is_open_end(seg) for seg in segments]
+            return []
+
+        base = server_factory(clipper)
         status, body = post_json(
             base, "/api/clip",
             {"source": "https://youtu.be/ID", "start": "0:05", "end": "*"},
         )
         assert status == 202
-        for _ in range(50):
+        for _ in range(100):
             job = json.loads(get(base, f"/api/jobs/{body['job_id']}")[1])
             if job["state"] != "running":
                 break
-            time.sleep(0.1)
-        assert job["state"] == "error"
-        assert "конец ролика" in job["error"]
+            time.sleep(0.05)
+        # Метаданные молчат — это не приговор: нарезчик получает открытый конец
+        # и сам подставит длительность после скачивания.
+        assert job["state"] == "done", job.get("error")
+        assert seen["open_ends"] == [True]
 
 
 class TestBatch:

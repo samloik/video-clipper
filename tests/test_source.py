@@ -10,9 +10,10 @@ from pathlib import Path
 import pytest
 
 from video_clipper.config import load_config
-from video_clipper.segments import Segment
+from video_clipper.segments import Segment, is_open_end, parse_range_spec
 from video_clipper.source import (
     YT_CLIENTS,
+    resolve_open_ends_for_source,
     ChallengeCooldown,
     Source,
     SourceError,
@@ -404,3 +405,37 @@ class TestDownload:
         assert src.is_temporary is False
         src.cleanup()  # must not delete anything
         assert sample_video.exists()
+
+
+class TestResolveOpenEnds:
+    def test_metadata_is_called_with_url_first(self, monkeypatch):
+        """Регрессия: аргументы fetch_metadata перепутаны местами — падало на cfg.strip."""
+        cfg = load_config(Path("/nonexistent/video-clipper-config.json"))
+        seen = {}
+
+        def fake_metadata(url, config):
+            seen["url"], seen["cfg"] = url, config
+            return {"duration": 27.0}
+
+        monkeypatch.setattr("video_clipper.source.fetch_metadata", fake_metadata)
+        resolved = resolve_open_ends_for_source(
+            [parse_range_spec("11-*")], "https://www.youtube.com/shorts/abc", cfg
+        )
+        assert seen["url"] == "https://www.youtube.com/shorts/abc"
+        assert seen["cfg"] is cfg
+        assert resolved[0].end == 27.0 and not is_open_end(resolved[0])
+
+    def test_local_file_uses_probe(self, sample_video):
+        cfg = load_config(Path("/nonexistent/video-clipper-config.json"))
+        resolved = resolve_open_ends_for_source([parse_range_spec("2-*")], str(sample_video), cfg)
+        assert resolved[0].end == pytest.approx(10.0, abs=0.5)
+
+    def test_closed_segments_do_not_touch_the_network(self, monkeypatch):
+        cfg = load_config(Path("/nonexistent/video-clipper-config.json"))
+
+        def boom(*args, **kwargs):
+            raise AssertionError("сеть не нужна, если конец задан")
+
+        monkeypatch.setattr("video_clipper.source.fetch_metadata", boom)
+        segs = [parse_range_spec("0-10")]
+        assert resolve_open_ends_for_source(segs, "https://youtu.be/x", cfg) == segs

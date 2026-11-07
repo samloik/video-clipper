@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 import time
 import shutil
@@ -211,7 +212,7 @@ def resolve_open_ends_for_source(
     if not has_open_ends(segments):
         return segments
     if is_url(source):
-        meta = fetch_metadata(cfg, source)
+        meta = fetch_metadata(source, cfg)
         duration = float(meta.get("duration") or 0)
     else:
         duration = probe_media(str(Path(source).expanduser()), cfg.ffprobe_path).duration
@@ -283,12 +284,16 @@ def _download(
                 break
         except Exception as exc:
             log.warning("Метаданные не получены (попытка %d/3): %s", attempt + 1, exc)
+            if is_bot_check(exc):
+                break  # тот же IP, тот же клиент: повтор ничего не изменит
             if attempt < 2:
                 time.sleep(2 * (attempt + 1))
 
     duration = float(meta.get("duration") or 0.0)
     if segments and duration > 0:
         for start, end in segments:
+            if math.isinf(end):
+                continue  # «до конца» — конец и есть длительность
             if end > duration + 0.5:
                 raise SourceError(
                     f"Отрезок {format_timecode(start)}–{format_timecode(end)} выходит за конец "

@@ -38,10 +38,14 @@ class Segment:
 
     @property
     def duration(self) -> float:
+        if is_open_end(self):
+            return math.inf
         return round(self.end - self.start, 3)
 
     @property
     def label(self) -> str:
+        if is_open_end(self):
+            return f"{format_timecode(self.start)}–конец"
         return f"{format_timecode(self.start)}–{format_timecode(self.end)}"
 
 

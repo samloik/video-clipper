@@ -16,6 +16,8 @@ from .cut import (
     vertical_name,
 )
 from .segments import (
+    has_open_ends,
+    resolve_open_ends,
     Segment,
     build_segments,
     clip_filename,
@@ -68,6 +70,8 @@ def run_pipeline(args: Any, cfg: Config) -> list[ClipResult]:
         keep_source=keep_source,
     )
     try:
+        if segments and has_open_ends(segments):
+            segments = resolve_open_ends(segments, src.info.duration)
         if whole:
             # No ranges given: the request is the entire video.
             if src.info.duration <= 0:

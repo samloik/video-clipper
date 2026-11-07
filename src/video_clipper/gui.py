@@ -31,8 +31,10 @@ from .probe import EnvironmentProblem, check_tools
 from .segments import (
     Segment,
     clip_filename,
+    has_open_ends,
     is_open_end,
     parse_end_token,
+    resolve_open_ends,
     validate_segments,
 )
 from .source import is_url
@@ -558,7 +560,9 @@ function renderEta(job) {
           ' – ' + fmtSeconds(totalHigh);
       }
     } else {
-      etaEl.textContent = 'считаю оценку…';
+      etaEl.textContent = job.stage === 'download'
+        ? 'оценку посчитаю, когда узнаю длительность ролика'
+        : 'оценка недоступна';
     }
     return;
   }
@@ -1022,6 +1026,8 @@ def _estimate(
     """Bot's model, minus the download part when the file is already on disk."""
     from .bot import DOWNLOAD_RATE, ENCODE_RATE
 
+    if any(is_open_end(seg) for seg in segments):
+        return None  # конец узнаем только после загрузки
     total = sum(seg.duration for seg in segments)
     if total <= 0:
         return None
@@ -1053,14 +1059,9 @@ def _run_job(
 
         try:
             segments = resolve_open_ends_for_source(segments, source, cfg)
-        except Exception as exc:  # noqa: BLE001 — «до конца» без длительности
-            _job_update(
-                job_id,
-                state="error",
-                error=f"Не понял, где конец ролика: {exc}",
-                message="",
-            )
-            return
+        except Exception as exc:  # noqa: BLE001 — метаданные могут молчать
+            # Не фатально: настоящую длительность даст скачанный файл.
+            log.info("Длительность заранее неизвестна (%s), конец определю после скачивания", exc)
         estimate = _estimate(source, segments, fast, vertical, layout)
         _job_update(
             job_id,
@@ -1140,6 +1141,8 @@ def default_clipper(
         progress=report,
     )
     try:
+        if has_open_ends(segments):
+            segments = resolve_open_ends(segments, src.info.duration)
         original_segments = segments
         segments = shift_segments(segments, src.offset)
         validate_segments(segments, duration=src.info.duration or None)
