@@ -36,6 +36,7 @@ from pathlib import Path
 
 from .config import Config, load_config
 from .segments import Segment, parse_range_spec
+from .source import fetch_metadata, is_url
 from .storage import describe, sweep
 
 log = logging.getLogger("video_clipper")
@@ -497,7 +498,9 @@ def estimate_seconds(request: "Request") -> tuple[float, float] | None:
     return work * 0.65, work * 1.8
 
 
-def describe_request(request: "Request", limit: int = 8) -> str:
+def describe_request(
+    request: "Request", limit: int = 8, duration: float = 0.0, title: str = ""
+) -> str:
     """Repeat the parsed request back, so a misread timecode is visible at once."""
     from .timecode import human_duration, human_timecode
 
@@ -516,8 +519,13 @@ def describe_request(request: "Request", limit: int = 8) -> str:
             f"Таймкодов нет — беру ролик целиком{mode_text}.\n"
             f"Качаю, это может занять пару минут..."
         )
+    from .timecode import human_duration
+
     count = len(request.segments)
     lines = [f"Понял так — {count} {_plural(count, 'отрезок', 'отрезка', 'отрезков')}{mode_text}:"]
+    if duration > 0:
+        name = f"«{title.strip()}»" if title.strip() else "ролик"
+        lines.append(f"{name} длится {human_duration(duration)}")
     for index, seg in enumerate(request.segments[:limit], 1):
         number = f"{index}. " if count > 1 else ""
         lines.append(
@@ -704,9 +712,31 @@ def handle_message(bot, cfg: Config, message: dict, clipper=None) -> None:
     if not request.segments:
         bot.send_message(chat_id, "Таймкодов нет — пришлю ролик целиком.")
 
+    # Metadata before the download: a wrong end time on a long video used to cost
+    # minutes of transfer before the error appeared.
+    meta: dict = {}
+    if request.segments and is_url(request.source):
+        meta = fetch_metadata(request.source, cfg)
+    duration = float(meta.get("duration") or 0.0)
+    title = str(meta.get("title") or "")
+    if duration and request.segments:
+        over = [seg for seg in request.segments if seg.end > duration + 0.5]
+        if over:
+            seg = over[0]
+            from .timecode import human_duration, human_timecode
+
+            name = f"«{title.strip()}»" if title.strip() else "ролик"
+            bot.send_message(
+                chat_id,
+                f"Не режу: отрезок {human_timecode(seg.start)}–{human_timecode(seg.end)} "
+                f"выходит за конец ролика.\n{name} длится {human_duration(duration)}. "
+                f"Поправь таймкод и пришли снова.",
+            )
+            return
+
     LAST_REQUESTS[chat_id] = request
     STOP_REQUESTED.clear()
-    bot.send_message(chat_id, describe_request(request))
+    bot.send_message(chat_id, describe_request(request, duration=duration, title=title))
     bot.send_chat_action(chat_id, "record_video")
 
     job: dict | None = None

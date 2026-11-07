@@ -13,6 +13,7 @@ from typing import Any, Callable, Iterable
 from .config import Config
 from .probe import MediaInfo, probe_media
 from .segments import Segment
+from .timecode import format_timecode
 from .storage import find_cached_source
 
 log = logging.getLogger("video_clipper")
@@ -58,6 +59,71 @@ def _coverage(segments: Iterable[tuple[float, float]], duration: float) -> float
         return 1.0
     total = sum(max(0.0, end - start) for start, end in segments)
     return min(1.0, total / duration)
+
+
+# Metadata is fetched twice per request in the worst case — once to validate the
+# timecodes before downloading, once inside the download. A short cache makes the
+# second one free.
+_META_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+META_TTL = 300.0
+
+
+def _base_opts(
+    cfg: Config, height: int | None = None, cancel_event: Any = None
+) -> dict[str, Any]:
+    height = height or cfg.default_resolution
+    opts: dict[str, Any] = {
+        "format": f"bv*[height<={height}]+ba/b[height<={height}]/b",
+        "quiet": True,
+        "no_warnings": True,
+        "noprogress": True,
+        "merge_output_format": "mp4",
+        "restrictfilenames": False,
+        "noplaylist": True,
+        "retries": 3,
+        "socket_timeout": 30,
+    }
+    if cfg.proxy:
+        opts["proxy"] = cfg.proxy
+    if cfg.cookies:
+        cookies = Path(cfg.cookies).expanduser()
+        if cookies.is_file():
+            opts["cookiefile"] = str(cookies)
+    if cancel_event is not None:
+        # yt-dlp calls the hook while downloading: raising aborts the transfer.
+        def _hook(_progress: dict[str, Any]) -> None:
+            if cancel_event.is_set():
+                raise RuntimeError("остановлено пользователем")
+
+        opts["progress_hooks"] = [_hook]
+    return opts
+
+
+def fetch_metadata(
+    source: str,
+    cfg: Config,
+    downloader: Callable[[str, dict[str, Any]], dict[str, Any]] | None = None,
+    ttl: float = META_TTL,
+) -> dict[str, Any]:
+    """Title and duration without downloading media. Returns {} on failure.
+
+    Used to check the timecodes before a download starts: on a two-hour video a
+    wrong end time used to cost minutes of transfer before the error surfaced.
+    """
+    if not is_url(source):
+        return {}
+    cached = _META_CACHE.get(source)
+    if cached and time.time() - cached[0] < ttl:
+        return cached[1]
+    try:
+        extract = downloader or _ytdlp_extract
+        meta = extract(source, {**_base_opts(cfg), "skip_download": True}) or {}
+    except Exception as exc:  # metadata is best-effort, never fatal here
+        log.info("Метаданные недоступны (%s): %s", source, exc)
+        return {}
+    if meta.get("duration"):
+        _META_CACHE[source] = (time.time(), meta)
+    return meta
 
 
 def prepare_source(
@@ -136,33 +202,10 @@ def _download(
     sections_dir = cache_dir / "sections"
     outtmpl = str(cache_dir / "%(title).80s-%(id)s.%(ext)s")
 
-    opts: dict[str, Any] = {
-        "format": f"bv*[height<={height}]+ba/b[height<={height}]/b",
-        "outtmpl": outtmpl,
-        "quiet": True,
-        "no_warnings": True,
-        "noprogress": True,
-        "merge_output_format": "mp4",
-        "restrictfilenames": False,
-        "noplaylist": True,
-        "retries": 3,
-        "socket_timeout": 30,
-    }
-    if cancel_event is not None:
-        # yt-dlp calls the hook while downloading: raising aborts the transfer.
-        def _hook(_progress: dict[str, Any]) -> None:
-            if cancel_event.is_set():
-                raise RuntimeError("остановлено пользователем")
-
-        opts["progress_hooks"] = [_hook]
-    if cfg.proxy:
-        opts["proxy"] = cfg.proxy
-    if cfg.cookies:
-        cookies = Path(cfg.cookies).expanduser()
-        if cookies.is_file():
-            opts["cookiefile"] = str(cookies)
-        else:
-            log.warning("Файл cookies не найден, продолжаю без него: %s", cookies)
+    opts: dict[str, Any] = _base_opts(cfg, height, cancel_event)
+    opts["outtmpl"] = outtmpl
+    if cfg.cookies and not Path(cfg.cookies).expanduser().is_file():
+        log.warning("Файл cookies не найден, продолжаю без него: %s", cfg.cookies)
 
     extract = downloader or _ytdlp_extract
 
@@ -170,11 +213,17 @@ def _download(
     # saves bandwidth (skip_download keeps this cheap). Site throttling makes a
     # single attempt flaky, and losing the duration means an expensive full
     # download — so it is retried.
+    cached_meta = _META_CACHE.get(url)
     meta: dict[str, Any] = {}
+    if cached_meta and time.time() - cached_meta[0] < META_TTL:
+        meta = cached_meta[1]
     for attempt in range(3):
+        if meta.get("duration"):
+            break
         try:
             meta = extract(url, {**opts, "skip_download": True}) or {}
             if meta.get("duration"):
+                _META_CACHE[url] = (time.time(), meta)
                 break
         except Exception as exc:
             log.warning("Метаданные не получены (попытка %d/3): %s", attempt + 1, exc)
@@ -182,6 +231,13 @@ def _download(
                 time.sleep(2 * (attempt + 1))
 
     duration = float(meta.get("duration") or 0.0)
+    if segments and duration > 0:
+        for start, end in segments:
+            if end > duration + 0.5:
+                raise SourceError(
+                    f"Отрезок {format_timecode(start)}–{format_timecode(end)} выходит за конец "
+                    f"ролика ({format_timecode(duration)}). Скачивание не начинал — поправь таймкод."
+                )
     opts = dict(opts)
     # Unknown duration: sections are still the cheaper bet for a short request,
     # and a failure falls back to the full download below.

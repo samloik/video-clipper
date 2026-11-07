@@ -120,6 +120,16 @@ class TestShiftSegments:
         assert [(s.start, s.end) for s in shifted] == [(0, 10), (100, 110)]
 
 
+@pytest.fixture(autouse=True)
+def clear_meta_cache():
+    """Metadata caching must not leak between tests (they reuse the same fake URL)."""
+    from video_clipper import source as source_module
+
+    source_module._META_CACHE.clear()
+    yield
+    source_module._META_CACHE.clear()
+
+
 class TestDownload:
     def test_uses_config_proxy_and_cookies(self, tmp_path, sample_video):
         cfg_file = tmp_path / "config.json"
@@ -197,6 +207,20 @@ class TestDownload:
         with pytest.raises(SourceError, match="Полную загрузку не начинаю"):
             prepare_source("https://youtu.be/x", cfg, segments=[(0, 20)], downloader=downloader)
         assert len(attempts) == 2  # metadata + the failed section attempt, no third try
+
+    def test_range_past_the_end_never_starts_a_download(self, tmp_path):
+        calls = []
+
+        def downloader(url, opts):
+            calls.append(bool(opts.get("skip_download")))
+            if opts.get("skip_download"):
+                return {"duration": 10.0, "title": "короткий"}
+            raise AssertionError("скачивание не должно было начаться")
+
+        cfg = load_config(None).with_overrides(cache_dir=tmp_path / "cache")
+        with pytest.raises(SourceError, match="выходит за конец ролика"):
+            prepare_source("https://youtu.be/x", cfg, segments=[(0, 20)], downloader=downloader)
+        assert calls == [True], "был только запрос метаданных"
 
     def test_download_failure_is_reported(self):
         def broken(url, opts):

@@ -22,6 +22,68 @@ from video_clipper.segments import Segment
 from video_clipper.storage import describe, find_cached_source, sweep, video_id_from_url
 
 
+@pytest.fixture(autouse=True)
+def no_metadata_network(monkeypatch):
+    """The bot asks the site for metadata before downloading — never in tests."""
+    from video_clipper import source as source_module
+
+    source_module._META_CACHE.clear()
+    monkeypatch.setattr("video_clipper.bot.fetch_metadata", lambda *args, **kwargs: {})
+    yield
+    source_module._META_CACHE.clear()
+
+
+class TestPreDownloadCheck:
+    def test_range_past_the_end_is_refused_before_download(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            "video_clipper.bot.fetch_metadata",
+            lambda *a, **kw: {"duration": 923.0, "title": "Ограбление века"},
+        )
+        calls = []
+
+        def clipper(*args, **kwargs):
+            calls.append(args)
+            return []
+
+        bot = FakeBot()
+        handle_message(
+            bot,
+            _cfg(tmp_path),
+            {"chat": {"id": 1}, "text": "https://youtu.be/x 0:00-99:00"},
+            clipper=clipper,
+        )
+        assert calls == [], "скачивание не должно начинаться"
+        message = "\n".join(text for _, text in bot.messages)
+        assert "выходит за конец ролика" in message
+        assert "15 мин 23 с" in message
+        assert "Ограбление века" in message
+
+    def test_echo_names_the_video_and_its_length(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            "video_clipper.bot.fetch_metadata",
+            lambda *a, **kw: {"duration": 923.0, "title": "Ограбление века"},
+        )
+        bot = FakeBot()
+        handle_message(
+            bot,
+            _cfg(tmp_path),
+            {"chat": {"id": 1}, "text": "https://youtu.be/x 0:00-0:12"},
+            clipper=lambda *a, **kw: [],
+        )
+        echo = next(text for _, text in bot.messages if "Понял так" in text)
+        assert "«Ограбление века» длится 15 мин 23 с" in echo
+
+    def test_metadata_failure_does_not_block_the_request(self, tmp_path):
+        bot = FakeBot()
+        handle_message(
+            bot,
+            _cfg(tmp_path),
+            {"chat": {"id": 1}, "text": "https://youtu.be/x 0:00-0:12"},
+            clipper=lambda *a, **kw: [],
+        )
+        assert any("Понял так" in text for _, text in bot.messages)
+
+
 class TestVideoId:
     def test_youtube_watch(self):
         assert video_id_from_url("https://www.youtube.com/watch?v=jNQXAC9IVRw&t=3s") == "jNQXAC9IVRw"
