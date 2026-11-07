@@ -47,7 +47,7 @@ URL_RE = re.compile(r"https?://\S+")
 # Characters a timecode may consist of: digits and any of the component
 # separators the parser understands (":12" is a valid 0:12).
 _TC_CHARS_RE = re.compile(r"^[\d:\\/.,]+$")
-INFO = """Как присылать запрос
+INFO_TEMPLATE = """Как присылать запрос
 
 Ссылка и таймкоды в одном сообщении — в строку или с новой строки:
 https://youtu.be/ID 0:10-0:20
@@ -80,6 +80,11 @@ https://youtu.be/ID 0:10-0:20
   /clean    только удалить файлы
   /id       chat_id для конфига
 
+ВЕБ-ИНТЕРФЕЙС
+  {gui}
+  то же самое в браузере — с телефона или ноутбука в домашней сети.
+  Пароль лежит в файле: {gui_password}
+
 ОГРАНИЧЕНИЯ
   Telegram принимает файлы до 50 МБ — больший клип бот режет на части без
   пересжатия (качество не меняется) и присылает их по очереди с пометкой «часть i/n».
@@ -87,6 +92,38 @@ https://youtu.be/ID 0:10-0:20
   Файлы живут retention_minutes (обычно 30 минут) после последнего использования.
   Если YouTube требует подтверждение (бот-чек), бот делает паузу и повторяет
   запрос сам через 15 минут — отменить повтор можно командой /stop."""
+
+
+def lan_ip() -> str:
+    """Адрес машины в домашней сети (для ссылки на GUI)."""
+    import socket as _socket
+
+    probe = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+    try:
+        probe.connect(("8.8.8.8", 80))
+        return probe.getsockname()[0]
+    except OSError:
+        return ""
+    finally:
+        probe.close()
+
+
+def gui_url(cfg: Config) -> str:
+    host = (cfg.gui_host or "127.0.0.1").strip()
+    if host in ("0.0.0.0", "::", "*", ""):
+        host = lan_ip() or "127.0.0.1"
+    return f"http://{host}:{cfg.gui_port}/"
+
+
+def build_info(cfg: Config) -> str:
+    password = cfg.gui_password_file
+    if password and Path(str(password)).expanduser().is_file():
+        where = str(Path(str(password)).expanduser())
+    elif password:
+        where = f"{password} (файла пока нет)"
+    else:
+        where = "не задан — GUI работает только с localhost"
+    return INFO_TEMPLATE.format(gui=gui_url(cfg), gui_password=where)
 
 
 HELP = (
@@ -849,7 +886,7 @@ def handle_message(bot, cfg: Config, message: dict, clipper=None) -> None:
         bot.send_message(chat_id, HELP.format(minutes=cfg.retention_minutes))
         return
     if command in ("/info", "/форматы"):
-        for chunk in split_long(INFO):
+        for chunk in split_long(build_info(cfg)):
             bot.send_message(chat_id, chunk)
         return
     if command == "/id":

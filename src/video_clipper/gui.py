@@ -37,27 +37,47 @@ LOGIN_WINDOW = 600.0
 LOGIN_ATTEMPTS = 6
 
 LOGIN_PAGE = """<!doctype html>
-<html lang="ru"><head><meta charset="utf-8">
+<html lang="ru">
+<head>
+<meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>video-clipper — вход</title>
 <style>
- body{font:16px/1.5 system-ui,sans-serif;background:#111418;color:#e7e9ee;margin:0;
-      display:flex;min-height:100vh;align-items:center;justify-content:center}
- form{background:#1a1e24;padding:28px;border-radius:14px;min-width:280px;
-      box-shadow:0 8px 30px #0006}
- h1{font-size:18px;margin:0 0 16px}
- input{width:100%;padding:11px;border-radius:9px;border:1px solid #2c333d;
-       background:#111418;color:#e7e9ee;font-size:16px;box-sizing:border-box}
- button{margin-top:14px;width:100%;padding:11px;border:0;border-radius:9px;
-        background:#3b82f6;color:#fff;font-size:16px;cursor:pointer}
- p.err{color:#f87171;margin:0 0 12px;font-size:14px}
-</style></head><body>
-<form method="post" action="/login">
-  <h1>video-clipper</h1>
+:root{--bg:#0e1013;--panel:#15181d;--line:#252b34;--ink:#eef1f5;--ink-3:#6d7683;
+      --accent:#e0a458;--accent-ink:#1a1206;--err:#ef7c6a;
+      --mono:"JetBrains Mono","DejaVu Sans Mono",ui-monospace,monospace;
+      --sans:"IBM Plex Sans","Noto Sans","Liberation Sans",system-ui,sans-serif}
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;background:var(--bg);color:var(--ink);
+     font:15px/1.5 var(--sans);display:grid;place-items:center;padding:24px}
+.card{width:100%;max-width:340px}
+.brand{font-weight:600;margin-bottom:4px}
+.brand span{color:var(--ink-3);font-weight:400}
+.sub{color:var(--ink-3);font-size:12.5px;margin:0 0 22px}
+label{display:block;font-size:11px;letter-spacing:.09em;text-transform:uppercase;
+      color:var(--ink-3);margin-bottom:7px}
+input{width:100%;padding:11px 12px;border-radius:9px;border:1px solid var(--line);
+      background:var(--panel);color:var(--ink);font-size:15px;outline:none}
+input:focus{border-color:var(--accent);box-shadow:0 0 0 3px #e0a45822}
+button{margin-top:14px;width:100%;padding:12px;border:0;border-radius:9px;
+       background:var(--accent);color:var(--accent-ink);font:600 15px var(--sans);
+       cursor:pointer;min-height:44px}
+button:hover{filter:brightness(1.06)}
+.err{color:var(--err);font-size:13px;margin:0 0 14px}
+.foot{margin-top:18px;color:var(--ink-3);font-size:12px;font-family:var(--mono)}
+</style>
+</head>
+<body>
+<form class="card" method="post" action="/login">
+  <div class="brand">video-clipper <span>· вход</span></div>
+  <p class="sub">Локальный сервер нарезки. Пароль — в файле gui_password_file.</p>
   {error}
-  <input type="password" name="password" placeholder="пароль" autofocus autocomplete="current-password">
+  <label for="pw">пароль</label>
+  <input id="pw" type="password" name="password" autofocus autocomplete="current-password">
   <button type="submit">Войти</button>
-</form></body></html>"""
+  <div class="foot">сессия — 12 часов</div>
+</form>
+</body></html>"""
 
 
 class Auth:
@@ -102,126 +122,427 @@ PAGE = """<!doctype html>
 <html lang="ru">
 <head>
 <meta charset="utf-8">
-<title>video-clipper</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<title>video-clipper</title>
 <style>
-  :root { color-scheme: dark; }
-  body { margin:0; font:15px/1.5 system-ui, sans-serif; background:#14161a; color:#e7e9ee;
-         display:flex; justify-content:center; padding:32px 16px; }
-  main { width:100%; max-width:720px; }
-  h1 { font-size:20px; margin:0 0 4px; }
-  p.hint { color:#98a2b3; margin:0 0 20px; font-size:13px; }
-  #drop { border:2px dashed #3a4250; border-radius:12px; padding:28px; text-align:center;
-          color:#98a2b3; transition:.15s; cursor:pointer; }
-  #drop.over { border-color:#5b8def; background:#1b2130; color:#cfe0ff; }
-  .row { display:flex; gap:12px; margin-top:16px; flex-wrap:wrap; align-items:end; }
-  label { display:flex; flex-direction:column; gap:6px; font-size:13px; color:#98a2b3; }
-  input[type=text] { background:#1b1f27; border:1px solid #2c333f; color:#e7e9ee;
-                     border-radius:8px; padding:9px 11px; font:inherit; min-width:190px; }
-  input[type=text]:focus { outline:none; border-color:#5b8def; }
-  button { background:#5b8def; color:#fff; border:0; border-radius:8px; padding:10px 18px;
-           font:inherit; font-weight:600; cursor:pointer; }
-  button:disabled { background:#39414f; cursor:default; }
-  #status { margin-top:18px; font-size:13px; color:#98a2b3; white-space:pre-wrap; }
-  ul#results { list-style:none; padding:0; margin:14px 0 0; }
-  ul#results li { background:#1b1f27; border:1px solid #2c333f; border-radius:10px;
-                  padding:10px 12px; margin-bottom:8px; display:flex; justify-content:space-between;
-                  gap:12px; align-items:center; }
-  a { color:#7aa2ff; }
-  .err { color:#ff8f8f; }
-  .src { font-size:12px; color:#98a2b3; word-break:break-all; }
+:root{
+  --bg:#0e1013; --panel:#161a1f; --panel-2:#1b2027; --line:#2b323c; --line-2:#3a424e;
+  --ink:#eef1f5; --ink-2:#bcc5d1; --ink-3:#9aa3b0;
+  --accent:#e0a458; --accent-ink:#1a1206; --ok:#7fd1a3; --err:#ef7c6a;
+  --r:10px;
+  --mono:"JetBrains Mono","DejaVu Sans Mono",ui-monospace,SFMono-Regular,monospace;
+  --sans:"IBM Plex Sans","Noto Sans","Liberation Sans",system-ui,sans-serif;
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%}
+body{background:var(--bg);color:var(--ink);font:15px/1.5 var(--sans);
+     -webkit-font-smoothing:antialiased;
+     display:grid;grid-template-rows:auto minmax(0,1fr);height:100vh;height:100dvh;
+     overflow:hidden}
+.mono{font-family:var(--mono);font-variant-numeric:tabular-nums}
+
+.bar{display:flex;align-items:center;justify-content:space-between;gap:16px;
+     padding:13px 22px;border-bottom:1px solid var(--line);background:#101317}
+.brand{font-weight:600;letter-spacing:-.01em}
+.brand span{color:var(--ink-3);font-weight:400}
+.chip{font-size:12px;color:var(--ink-2);border:1px solid var(--line);
+      padding:4px 10px;border-radius:999px;display:inline-flex;align-items:center;gap:7px}
+.chip i{width:6px;height:6px;border-radius:50%;background:var(--line-2);display:block}
+.chip.ok i{background:var(--ok)}
+
+.grid{display:grid;grid-template-columns:minmax(320px,420px) minmax(0,1fr);
+      min-height:0;overflow:hidden}
+.col-out{overflow-y:auto}
+html{scrollbar-width:thin;scrollbar-color:#3a424e transparent}
+::-webkit-scrollbar{width:10px;height:10px}
+::-webkit-scrollbar-thumb{background:#3a424e;border-radius:6px}
+::-webkit-scrollbar-track{background:transparent}
+.col-form{padding:22px;border-right:1px solid var(--line);display:flex;
+          flex-direction:column;gap:18px}
+.col-out{padding:22px;display:flex;flex-direction:column;gap:14px;min-width:0}
+
+.label{font-size:12px;letter-spacing:.06em;text-transform:uppercase;
+       color:var(--ink-3);margin-bottom:8px;display:block;font-weight:500}
+
+.drop{border:1.5px dashed var(--line-2);border-radius:var(--r);padding:20px 16px;
+      display:flex;flex-direction:column;gap:4px;cursor:pointer;
+      background:var(--panel);transition:border-color .15s,background .15s}
+.drop:hover{border-color:var(--accent);background:var(--panel-2)}
+.drop.over{border-color:var(--accent);background:#211c14}
+.drop strong{font-weight:500;font-size:14.5px}
+.drop small{color:var(--ink-3);font-size:12.5px}
+.drop.has-file{border-style:solid;border-color:var(--line-2)}
+.drop.has-file strong{color:var(--accent);font-family:var(--mono);font-size:13px;
+                      word-break:break-all}
+
+input[type=text]{width:100%;background:var(--panel);border:1px solid var(--line);
+  color:var(--ink);border-radius:9px;padding:11px 12px;font-size:15px;outline:none;
+  line-height:1.25}
+input[type=text]:focus{border-color:var(--accent);box-shadow:0 0 0 3px #e0a45822}
+input::placeholder{color:#78818e}
+
+.or{display:flex;align-items:center;gap:10px;color:var(--ink-3);font-size:12px;
+    margin:2px 0}
+.or::before,.or::after{content:"";height:1px;background:var(--line);flex:1}
+
+.range{display:grid;grid-template-columns:1fr auto 1fr;align-items:end;gap:10px}
+.range label{display:flex;flex-direction:column;min-width:0}
+.range label span{font-size:11.5px;color:var(--ink-3);margin-bottom:6px}
+.range .dash{color:var(--ink-3);padding-bottom:12px;font-family:var(--mono)}
+.range input{font-size:15px}
+.range label:first-child input,.range label:last-child input{text-align:center}
+
+.presets{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-top:10px}
+.presets button{background:transparent;border:1px solid var(--line);color:var(--ink-2);
+  border-radius:7px;padding:6px 10px;font-size:12px;font-family:var(--mono);
+  cursor:pointer;min-height:32px}
+.presets button:hover{border-color:var(--line-2);color:var(--ink)}
+.presets button.on{border-color:var(--accent);color:var(--accent);background:#e0a45814}
+.presets .reset{margin-left:auto;border-color:transparent;color:var(--ink-3);
+  text-decoration:underline;text-underline-offset:3px;font-family:var(--sans)}
+.presets .reset:hover{color:var(--ink-2)}
+
+.modes{display:flex;flex-direction:column;border-top:1px solid var(--line);padding-top:10px}
+.switch{display:flex;align-items:flex-start;gap:11px;padding:9px 0;cursor:pointer;min-height:44px}
+.switch input{appearance:none;width:36px;height:20px;border-radius:999px;
+  background:#3a424e;position:relative;cursor:pointer;flex:none;margin-top:2px;
+  transition:background .15s}
+.switch input::after{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;
+  border-radius:50%;background:#aab3c0;transition:transform .15s,background .15s}
+.switch input:checked{background:#4a3a20}
+.switch input:checked::after{transform:translateX(16px);background:var(--accent)}
+.switch strong{display:block;font-size:14px;font-weight:400;color:var(--ink-2)}
+.switch input:checked ~ strong{color:var(--ink)}
+.switch em{display:block;font-style:normal;font-size:12px;color:var(--ink-3);margin-top:1px}
+
+.primary{width:100%;padding:13px 16px;border:0;border-radius:9px;
+  background:var(--accent);color:var(--accent-ink);font:600 15px var(--sans);
+  cursor:pointer;transition:filter .15s,transform .06s}
+.primary:hover:not(:disabled){filter:brightness(1.06)}
+.primary:active:not(:disabled){transform:translateY(1px)}
+.primary:disabled{background:#252b34;color:#98a1ae;cursor:not-allowed}
+.primary:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+
+.hint{margin:0;color:var(--ink-3);font-size:12.5px;line-height:1.5}
+.hint b{color:var(--ink-2);font-weight:500;font-family:var(--mono)}
+
+.out-head{display:flex;align-items:baseline;justify-content:space-between;gap:12px}
+.out-head .label{margin:0}
+.timer{font-size:12.5px;color:var(--ink-3)}
+
+.status{color:var(--ink-3);font-size:13.5px;min-height:22px;display:flex;
+  align-items:center;gap:9px;padding:0}
+.status.busy,.status.err{border:1px solid var(--line);background:var(--panel);
+  border-radius:var(--r);padding:12px 14px;min-height:46px}
+.status.busy{color:var(--ink)}
+.status.err{border-color:#5f2f28;background:#1e1513;color:var(--err)}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--accent);flex:none;
+  animation:pulse 1.1s ease-in-out infinite}
+@keyframes pulse{0%,100%{opacity:.35}50%{opacity:1}}
+@media (prefers-reduced-motion:reduce){.dot{animation:none}*{transition:none!important}}
+
+.results{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;
+  border:1px solid var(--line);border-radius:var(--r);overflow:hidden}
+.results:empty{display:none}
+.results li{display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:14px;
+  align-items:center;padding:13px 14px;border-bottom:1px solid var(--line);
+  background:var(--panel)}
+.results li:last-child{border-bottom:0}
+.results a.file{color:var(--ink);text-decoration:none;font-size:13.5px;display:block;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.results a.file:hover{color:var(--accent);text-decoration:underline}
+.results .meta{color:var(--ink-3);font-size:12px;margin-top:3px}
+.results .size{color:var(--ink-3);font-size:12px;font-family:var(--mono)}
+.results .get{color:var(--accent);text-decoration:none;font-size:12.5px;
+  border:1px solid var(--line);border-radius:7px;padding:7px 11px;min-height:34px;
+  display:inline-flex;align-items:center}
+.results .get:hover{border-color:var(--accent)}
+
+.empty{border:1px solid var(--line);border-radius:var(--r);padding:18px 16px;
+  color:var(--ink-3);font-size:13px;line-height:1.6;display:flex;flex-direction:column;gap:10px}
+.empty b{color:var(--ink-2);font-weight:500;font-size:13.5px}
+.steps{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:7px}
+.steps li{display:flex;gap:10px;align-items:baseline}
+.steps i{font-style:normal;font-family:var(--mono);font-size:11.5px;color:var(--accent);
+  width:14px;flex:none}
+
+@media (max-width:840px){
+  body{height:auto;min-height:100dvh;overflow:visible;display:block}
+  .grid{grid-template-columns:1fr;height:auto;overflow:visible}
+  .col-out{overflow:visible}
+  .col-form{border-right:0;border-bottom:1px solid var(--line)}
+  .results li{grid-template-columns:minmax(0,1fr) auto}
+  .results .size{display:none}
+  .empty{min-height:120px}
+  .presets button{min-height:40px;padding:9px 13px}
+  .presets .reset{display:inline-flex;align-items:center;padding:9px 8px}
+  .brand span{display:none}
+  .switch{padding:11px 0}
+}
+@media (max-width:520px){
+  .bar{padding:12px 16px}
+  .col-form,.col-out{padding:16px}
+  .range{grid-template-columns:1fr auto 1fr;gap:8px}
+}
 </style>
 </head>
 <body>
-<main>
-  <h1>video-clipper</h1>
-  <p class="hint">Перетащи видеофайл в поле ниже или вставь ссылку. Таймкоды: ЧЧ:ММ:СС, ММ:СС или секунды.</p>
+<header class="bar">
+  <div class="brand">video-clipper <span>· нарезка по таймкодам</span></div>
+  <div><span class="chip mono" id="svc"><i></i><span id="svc-text">проверяю связь</span></span></div>
+</header>
 
-  <div id="drop">Перетащи файл сюда или нажми, чтобы выбрать</div>
-  <input id="file" type="file" accept="video/*" hidden>
+<main class="grid">
+  <section class="col-form">
+    <div>
+      <span class="label">Источник</span>
+      <div id="drop" class="drop" tabindex="0" role="button" aria-label="Выбрать видеофайл">
+        <strong id="drop-title">Выбери файл или перетащи</strong>
+        <small id="drop-sub">mp4, mov, mkv, webm · до 4 ГБ</small>
+      </div>
+      <input id="file" type="file" accept="video/*" hidden>
+      <div class="or">или ссылка</div>
+      <input id="url" class="mono" type="text" placeholder="https://youtu.be/…" autocomplete="off" spellcheck="false" aria-label="Ссылка на видео">
+    </div>
 
-  <div class="row">
-    <label>Ссылка (YouTube, TikTok, ...)<input id="url" type="text" placeholder="https://..."></label>
-  </div>
-  <div class="row">
-    <label>Начало<input id="start" type="text" value="0:00" size="10"></label>
-    <label>Конец<input id="end" type="text" value="0:30" size="10"></label>
-    <label style="flex-direction:row;align-items:center;gap:8px;color:#e7e9ee">
-      <input id="fast" type="checkbox"> быстро, без перекодирования
-    </label>
-    <label style="flex-direction:row;align-items:center;gap:8px;color:#e7e9ee">
-      <input id="vertical" type="checkbox"> вертикально 9:16
-    </label>
-    <button id="go">Нарезать</button>
-  </div>
+    <div>
+      <span class="label">Диапазон</span>
+      <div class="range">
+        <label><span>начало</span><input id="start" class="mono" type="text" value="0:00" inputmode="numeric" aria-label="Начало"></label>
+        <span class="dash">→</span>
+        <label><span>конец</span><input id="end" class="mono" type="text" value="0:30" inputmode="numeric" aria-label="Конец"></label>
+      </div>
+      <div class="presets">
+        <button type="button" data-len="15">15 с</button>
+        <button type="button" data-len="30">30 с</button>
+        <button type="button" data-len="60">1 мин</button>
+        <button type="button" data-len="180">3 мин</button>
+        <button type="button" class="reset" data-reset="1">сброс</button>
+      </div>
+      <p class="hint" style="margin-top:9px">Таймкоды: <b>45</b>, <b>1:12</b>, <b>0:00:10</b>.<br>Вместо «-» можно «=»: <b>1:00=0:30</b> — с 1:00 тридцать секунд.</p>
+    </div>
 
-  <div id="status"></div>
-  <ul id="results"></ul>
+    <div class="modes">
+      <label class="switch">
+        <input id="fast" type="checkbox">
+        <span><strong>без перекодирования</strong><em>быстрее, но границы по ключевому кадру</em></span>
+      </label>
+      <label class="switch">
+        <input id="vertical" type="checkbox">
+        <span><strong>вертикально 9:16</strong><em>для смартфона, с обрезкой боков</em></span>
+      </label>
+    </div>
+
+    <button id="go" class="primary" disabled>Нарезать</button>
+  </section>
+
+  <section class="col-out">
+    <div class="out-head">
+      <span class="label">Результат</span>
+      <span class="timer mono" id="timer"></span>
+    </div>
+    <div class="status" id="status">Ждёт задание</div>
+    <ul class="results" id="results"></ul>
+    <div class="empty" id="empty">
+      <b>Здесь появятся клипы</b>
+      <ul class="steps">
+        <li><i>1</i><span>файл или ссылка — слева</span></li>
+        <li><i>2</i><span>начало и конец отрезка</span></li>
+        <li><i>3</i><span>клип можно скачать сразу</span></li>
+      </ul>
+    </div>
+  </section>
 </main>
+
 <script>
-const drop = document.getElementById('drop');
-const fileInput = document.getElementById('file');
-const statusEl = document.getElementById('status');
-const resultsEl = document.getElementById('results');
-let uploadedPath = null;
+const $ = (id) => document.getElementById(id);
+const drop = $('drop'), fileInput = $('file'), statusEl = $('status'),
+      resultsEl = $('results'), timerEl = $('timer'), emptyEl = $('empty'),
+      goBtn = $('go'), urlEl = $('url');
+let uploadedPath = null, startedAt = 0, tick = null;
 
-drop.addEventListener('click', () => fileInput.click());
-fileInput.addEventListener('change', () => { if (fileInput.files[0]) upload(fileInput.files[0]); });
-['dragenter','dragover'].forEach(e => drop.addEventListener(e, ev => {
-  ev.preventDefault(); drop.classList.add('over');
-}));
-['dragleave','drop'].forEach(e => drop.addEventListener(e, ev => {
-  ev.preventDefault(); drop.classList.remove('over');
-}));
-drop.addEventListener('drop', ev => {
-  const f = ev.dataTransfer.files[0];
-  if (f) upload(f);
-});
+fetch('/api/health').then(r => r.json()).then(d => {
+  $('svc-text').textContent = d.status === 'ok' ? 'сервис работает' : 'нет связи';
+  if (d.status === 'ok') $('svc').classList.add('ok');
+}).catch(() => { $('svc-text').textContent = 'нет связи'; });
 
-async function upload(file) {
-  drop.textContent = file.name;
-  statusEl.textContent = 'Загружаю ' + file.name + ' (' + Math.round(file.size/1048576) + ' МБ)...';
-  const res = await fetch('/api/upload?name=' + encodeURIComponent(file.name), { method:'POST', body:file });
-  const data = await res.json();
-  if (!res.ok) { statusEl.innerHTML = '<span class="err">' + (data.error || 'ошибка загрузки') + '</span>'; return; }
-  uploadedPath = data.path; statusEl.textContent = 'Файл готов: ' + file.name;
+function setStatus(text, kind) {
+  statusEl.className = 'status' + (kind ? ' ' + kind : '');
+  statusEl.textContent = '';
+  if (kind === 'busy') {
+    const dot = document.createElement('span');
+    dot.className = 'dot';
+    statusEl.append(dot);
+  }
+  statusEl.append(document.createTextNode(text));
 }
 
-document.getElementById('go').addEventListener('click', async () => {
+function refreshGo() {
+  goBtn.disabled = !(urlEl.value.trim() || uploadedPath);
+}
+urlEl.addEventListener('input', refreshGo);
+refreshGo();
+
+function plural(n, one, few, many) {
+  const mod10 = n % 10, mod100 = n % 100;
+  if (mod10 === 1 && mod100 !== 11) return n + ' ' + one;
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return n + ' ' + few;
+  return n + ' ' + many;
+}
+
+function formatSeconds(value) {
+  return value.toFixed(2).replace('.', ',') + ' с';
+}
+
+function formatSize(bytes) {
+  const mb = bytes / 1048576;
+  if (mb >= 1) return mb.toFixed(1).replace('.', ',') + ' МБ';
+  return Math.round(bytes / 1024) + ' КБ';
+}
+
+function modeName(mode) {
+  if (mode.startsWith('whole')) return 'целиком';
+  if (mode.includes('vertical-blur')) return '9:16 с фоном';
+  if (mode.includes('vertical')) return '9:16';
+  if (mode === 'fast') return 'без перекодирования';
+  return 'точный';
+}
+
+function toSeconds(text) {
+  let buf = String(text).trim();
+  [':', ',', '.', '/', String.fromCharCode(92)].forEach(sep => { buf = buf.split(sep).join(':'); });
+  const parts = buf.split(':').filter(p => p !== '').map(p => parseFloat(p) || 0);
+  if (parts.length === 1) return parts[0];
+  if (parts.length === 2) return parts[0] * 60 + parts[1];
+  return parts[0] * 3600 + parts[1] * 60 + parts[2];
+}
+
+function startTimer() {
+  startedAt = Date.now();
+  clearInterval(tick);
+  tick = setInterval(() => {
+    const s = Math.floor((Date.now() - startedAt) / 1000);
+    timerEl.textContent = 'обработка ' + (s >= 60 ? Math.floor(s / 60) + ' мин ' : '') + (s % 60) + ' с';
+  }, 1000);
+}
+function stopTimer() { clearInterval(tick); tick = null; }
+
+drop.addEventListener('click', () => fileInput.click());
+drop.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fileInput.click(); } });
+fileInput.addEventListener('change', () => { if (fileInput.files[0]) upload(fileInput.files[0]); });
+['dragenter','dragover'].forEach(e => drop.addEventListener(e, ev => { ev.preventDefault(); drop.classList.add('over'); }));
+['dragleave','drop'].forEach(e => drop.addEventListener(e, ev => { ev.preventDefault(); drop.classList.remove('over'); }));
+drop.addEventListener('drop', ev => { const f = ev.dataTransfer.files[0]; if (f) upload(f); });
+
+async function upload(file) {
+  const mb = Math.round(file.size / 1048576);
+  drop.classList.add('has-file');
+  $('drop-title').textContent = file.name;
+  $('drop-sub').textContent = 'загружаю · ' + mb + ' МБ';
+  setStatus('Загружаю файл…', 'busy');
+  try {
+    const res = await fetch('/api/upload?name=' + encodeURIComponent(file.name), { method: 'POST', body: file });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'ошибка загрузки');
+    uploadedPath = data.path;
+    urlEl.value = '';
+    $('drop-sub').textContent = 'файл готов · ' + mb + ' МБ';
+    setStatus('Файл загружен — задай диапазон и нажми «Нарезать»');
+  } catch (err) {
+    drop.classList.remove('has-file');
+    $('drop-title').textContent = 'Выбери файл или перетащи';
+    $('drop-sub').textContent = 'mp4, mov, mkv, webm · до 4 ГБ';
+    setStatus(err.message, 'err');
+  }
+  refreshGo();
+}
+
+const presetButtons = [...document.querySelectorAll('.presets button[data-len]')];
+function markPreset(len) {
+  presetButtons.forEach(b => b.classList.toggle('on', Number(b.dataset.len) === len));
+}
+presetButtons.forEach(btn => {
+  btn.addEventListener('click', () => {
+    const len = Number(btn.dataset.len);
+    $('end').value = len >= 60 ? Math.floor(len / 60) + ':' + String(len % 60).padStart(2, '0')
+                               : '0:' + String(len).padStart(2, '0');
+    markPreset(len);
+  });
+});
+document.querySelector('.presets .reset').addEventListener('click', () => {
+  $('start').value = '0:00'; $('end').value = '0:30'; markPreset(30);
+});
+function syncPreset() {
+  const len = Math.round(toSeconds($('end').value) - toSeconds($('start').value));
+  markPreset(len);
+}
+[$('start'), $('end')].forEach(el => el.addEventListener('input', syncPreset));
+syncPreset();
+
+async function run() {
   resultsEl.innerHTML = '';
-  const url = document.getElementById('url').value.trim();
+  emptyEl.style.display = 'none';
+  const url = urlEl.value.trim();
   const source = url || uploadedPath;
-  if (!source) { statusEl.innerHTML = '<span class="err">Нужен файл или ссылка</span>'; return; }
+  if (!source) { setStatus('Нужен файл или ссылка', 'err'); return; }
   const body = {
     source,
-    start: document.getElementById('start').value.trim(),
-    end: document.getElementById('end').value.trim(),
-    fast: document.getElementById('fast').checked,
-    vertical: document.getElementById('vertical').checked
+    start: $('start').value.trim(),
+    end: $('end').value.trim(),
+    fast: $('fast').checked,
+    vertical: $('vertical').checked
   };
-  const btn = document.getElementById('go'); btn.disabled = true;
-  statusEl.textContent = 'Запускаю...';
+  goBtn.disabled = true; goBtn.textContent = 'Режу…';
+  setStatus('Ставлю задание в очередь', 'busy');
+  startTimer();
   try {
-    const res = await fetch('/api/clip', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
+    const res = await fetch('/api/clip', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body) });
     const data = await res.json();
-    if (!res.ok) { statusEl.innerHTML = '<span class="err">' + (data.error || 'ошибка') + '</span>'; return; }
+    if (!res.ok) throw new Error(data.error || 'не удалось запустить');
     await poll(data.job_id);
-  } finally { btn.disabled = false; }
-});
+  } catch (err) {
+    setStatus(err.message, 'err');
+    emptyEl.style.display = '';
+  } finally {
+    stopTimer();
+    goBtn.textContent = 'Нарезать';
+    refreshGo();
+  }
+}
+
+goBtn.addEventListener('click', run);
+[urlEl, $('start'), $('end')].forEach(el => el.addEventListener('keydown', e => { if (e.key === 'Enter') run(); }));
 
 async function poll(id) {
   for (;;) {
-    const res = await fetch('/api/jobs/' + id);
-    const job = await res.json();
-    statusEl.textContent = job.state === 'running' ? (job.message || 'Нарезка...') : '';
-    if (job.state === 'error') { statusEl.innerHTML = '<span class="err">' + job.error + '</span>'; return; }
+    const job = await (await fetch('/api/jobs/' + id)).json();
+    if (job.state === 'running') setStatus(job.message || 'Работаю…', 'busy');
+    if (job.state === 'error') { setStatus(job.error || 'ошибка', 'err'); return; }
     if (job.state === 'done') {
-      statusEl.textContent = 'Готово: ' + job.results.length + ' файл(ов)';
+      setStatus('Готово · ' + plural(job.results.length, 'файл', 'файла', 'файлов'));
       job.results.forEach((r, i) => {
         const li = document.createElement('li');
-        li.innerHTML = '<div><a href="/api/download/' + id + '/' + i + '">' + r.filename +
-          '</a><div class="src">' + r.duration.toFixed(2) + ' с, ' + r.mode + '</div></div>' +
-          '<span class="src">' + Math.round(r.size_bytes/1024) + ' КБ</span>';
+
+        const left = document.createElement('div');
+        const link = document.createElement('a');
+        link.className = 'file';
+        link.href = '/api/download/' + id + '/' + i;
+        link.textContent = r.filename;
+        const meta = document.createElement('div');
+        meta.className = 'meta mono';
+        meta.textContent = formatSeconds(r.duration) + ' · ' + modeName(r.mode);
+        left.append(link, meta);
+
+        const size = document.createElement('span');
+        size.className = 'size';
+        size.textContent = formatSize(r.size_bytes);
+
+        const get = document.createElement('a');
+        get.className = 'get';
+        get.href = '/api/download/' + id + '/' + i;
+        get.textContent = 'скачать';
+
+        li.append(left, size, get);
         resultsEl.appendChild(li);
       });
       return;
@@ -231,8 +552,7 @@ async function poll(id) {
 }
 </script>
 </body>
-</html>
-"""
+</html>"""
 
 # job_id -> {"state": running|done|error, "results": [...], "error": str, "message": str, "files": [paths]}
 JOBS: dict[str, dict[str, Any]] = {}

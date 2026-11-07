@@ -11,6 +11,7 @@ import pytest
 
 from video_clipper.bot import (
     ProgressReporter,
+    build_info,
     clip_caption,
     describe_request,
     estimate_seconds,
@@ -403,6 +404,13 @@ class TestParseRequest:
     def test_alternate_separators_from_a_link(self):
         req = parse_request("https://youtu.be/x 1/12-1,30")
         assert [(s.start, s.end) for s in req.segments] == [(72.0, 90.0)]
+
+    def test_info_shows_the_gui_address(self):
+        cfg = _cfg(Path("/tmp")).with_overrides(gui_host="0.0.0.0", gui_port=8766)
+        memo = build_info(cfg)
+        assert "ВЕБ-ИНТЕРФЕЙС" in memo
+        assert ":8766" in memo and memo.count("http://") >= 1
+        assert "Пароль" in memo
 
     def test_info_command(self):
         bot = FakeBot()
