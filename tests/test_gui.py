@@ -230,6 +230,73 @@ class TestPageAndHealth:
 
 
 class TestClipApi:
+    def test_blur_layout_reaches_the_clipper(self, server_factory, tmp_path):
+        seen: dict = {}
+
+        def clipper(source, segments, fast, cfg, progress=None, vertical=False, layout="crop"):
+            seen.update(vertical=vertical, layout=layout)
+            out = tmp_path / "out" / "blur.mp4"
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_bytes(b"mp4")
+            return [
+                ClipResult(
+                    source=source,
+                    segment=segments[0],
+                    output_path=out,
+                    duration=1.0,
+                    mode="accurate+vertical-blur",
+                    size_bytes=3,
+                )
+            ]
+
+        base = server_factory(clipper)
+        media = tmp_path / "v.mp4"
+        media.write_bytes(b"x")
+        status, body = post_json(
+            base,
+            "/api/clip",
+            {"source": str(media), "start": "0:00", "end": "0:05", "vertical": True, "layout": "blur"},
+        )
+        assert status == 202
+        job_id = body["job_id"]
+        for _ in range(50):
+            job = json.loads(get(base, f"/api/jobs/{job_id}")[1])
+            if job["state"] != "running":
+                break
+            time.sleep(0.1)
+        assert job["state"] == "done", job
+        assert seen == {"vertical": True, "layout": "blur"}
+
+    def test_unknown_layout_falls_back_to_crop(self, server_factory, tmp_path):
+        seen: dict = {}
+
+        def clipper(source, segments, fast, cfg, progress=None, vertical=False, layout="crop"):
+            seen["layout"] = layout
+            out = tmp_path / "out" / "c.mp4"
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_bytes(b"mp4")
+            return [
+                ClipResult(
+                    source=source, segment=segments[0], output_path=out,
+                    duration=1.0, mode="accurate", size_bytes=3,
+                )
+            ]
+
+        base = server_factory(clipper)
+        media = tmp_path / "v.mp4"
+        media.write_bytes(b"x")
+        status, body = post_json(
+            base, "/api/clip",
+            {"source": str(media), "start": "0:00", "end": "0:05", "vertical": True, "layout": "hack"},
+        )
+        assert status == 202
+        for _ in range(50):
+            job = json.loads(get(base, f"/api/jobs/{body['job_id']}")[1])
+            if job["state"] != "running":
+                break
+            time.sleep(0.1)
+        assert seen["layout"] == "crop"
+
     def test_rejects_bad_timecode(self, server_factory, tmp_path):
         base = server_factory(fake_clipper(tmp_path / "out" / "clip.mp4"))
         media = tmp_path / "v.mp4"

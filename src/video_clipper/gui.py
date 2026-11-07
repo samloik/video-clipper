@@ -214,6 +214,12 @@ input::placeholder{color:#78818e}
 .switch strong{display:block;font-size:14px;font-weight:400;color:var(--ink-2)}
 .switch input:checked ~ strong{color:var(--ink)}
 .switch em{display:block;font-style:normal;font-size:12px;color:var(--ink-3);margin-top:1px}
+.layout-choice{display:flex;flex-wrap:wrap;align-items:center;gap:7px;padding:0 0 8px 47px}
+.layout-choice span{font-size:12px;color:var(--ink-3);margin-right:2px}
+.seg{border:1px solid var(--line);background:transparent;color:var(--ink-2);
+  border-radius:7px;padding:7px 11px;font-size:12.5px;cursor:pointer;min-height:34px}
+.seg:hover{border-color:var(--line-2);color:var(--ink)}
+.seg.on{border-color:var(--accent);color:var(--accent);background:#e0a45814}
 
 .primary{width:100%;padding:13px 16px;border:0;border-radius:9px;
   background:var(--accent);color:var(--accent-ink);font:600 15px var(--sans);
@@ -329,8 +335,13 @@ input::placeholder{color:#78818e}
       </label>
       <label class="switch">
         <input id="vertical" type="checkbox">
-        <span><strong>вертикально 9:16</strong><em>для смартфона, с обрезкой боков</em></span>
+        <span><strong>вертикально 9:16</strong><em>для смартфона</em></span>
       </label>
+      <div class="layout-choice" id="layout-choice" hidden>
+        <span>фон:</span>
+        <button type="button" class="seg on" data-layout="crop">обрезать боки</button>
+        <button type="button" class="seg" data-layout="blur">размытый фон</button>
+      </div>
     </div>
 
     <button id="go" class="primary" disabled>Нарезать</button>
@@ -359,7 +370,7 @@ const $ = (id) => document.getElementById(id);
 const drop = $('drop'), fileInput = $('file'), statusEl = $('status'),
       resultsEl = $('results'), timerEl = $('timer'), emptyEl = $('empty'),
       goBtn = $('go'), urlEl = $('url');
-let uploadedPath = null, startedAt = 0, tick = null;
+let uploadedPath = null, startedAt = 0, tick = null, layout = 'crop';
 
 fetch('/api/health').then(r => r.json()).then(d => {
   $('svc-text').textContent = d.status === 'ok' ? 'сервис работает' : 'нет связи';
@@ -376,6 +387,15 @@ function setStatus(text, kind) {
   }
   statusEl.append(document.createTextNode(text));
 }
+
+const choiceEl = $('layout-choice');
+$('vertical').addEventListener('change', (e) => { choiceEl.hidden = !e.target.checked; });
+document.querySelectorAll('.seg').forEach(btn => {
+  btn.addEventListener('click', () => {
+    layout = btn.dataset.layout;
+    document.querySelectorAll('.seg').forEach(x => x.classList.toggle('on', x === btn));
+  });
+});
 
 function refreshGo() {
   goBtn.disabled = !(urlEl.value.trim() || uploadedPath);
@@ -490,7 +510,8 @@ async function run() {
     start: $('start').value.trim(),
     end: $('end').value.trim(),
     fast: $('fast').checked,
-    vertical: $('vertical').checked
+    vertical: $('vertical').checked,
+    layout: $('vertical').checked ? layout : 'crop'
   };
   goBtn.disabled = true; goBtn.textContent = 'Режу…';
   setStatus('Ставлю задание в очередь', 'busy');
@@ -585,16 +606,20 @@ def _run_job(
     cfg: Config,
     clipper: Callable[..., list[ClipResult]],
     vertical: bool = False,
+    layout: str = "crop",
 ) -> None:
     try:
         _job_update(job_id, message="Готовлю источник...")
+        progress = lambda msg: _job_update(job_id, message=msg)  # noqa: E731
         try:
             results = clipper(
-                source, segments, fast, cfg, lambda msg: _job_update(job_id, message=msg),
-                vertical=vertical,
+                source, segments, fast, cfg, progress, vertical=vertical, layout=layout
             )
-        except TypeError:  # a custom clipper without the vertical parameter (tests)
-            results = clipper(source, segments, fast, cfg, lambda msg: _job_update(job_id, message=msg))
+        except TypeError:  # a custom clipper without the vertical/layout parameters (tests)
+            try:
+                results = clipper(source, segments, fast, cfg, progress, vertical=vertical)
+            except TypeError:
+                results = clipper(source, segments, fast, cfg, progress)
         payload = []
         files = []
         for res in results:
@@ -626,6 +651,8 @@ def default_clipper(
     from .cut import cut_segment, pick_vertical_size, vertical_name
     from .source import prepare_source, shift_segments
 
+    if vertical and layout not in ("crop", "blur"):
+        layout = "crop"
     if progress:
         progress("Подготовка источника...")
     src = prepare_source(source, cfg, segments=[(s.start, s.end) for s in segments])
@@ -852,6 +879,9 @@ def make_handler(
                     segments = [Segment(start, end)]
                     validate_segments(segments, duration=None)
                     vertical = bool(data.get("vertical", False))
+                    layout = str(data.get("layout") or "crop")
+                    if layout not in ("crop", "blur"):
+                        layout = "crop"
                 except ValueError as exc:
                     self._error(400, str(exc))
                     return
@@ -869,6 +899,7 @@ def make_handler(
                         cfg,
                         clipper,
                         vertical,
+                        layout,
                     ),
                     daemon=True,
                 ).start()
