@@ -459,7 +459,7 @@ class TestEstimate:
         assert long[1] > short[1] * 5
 
     def test_whole_video_has_no_estimate(self):
-        assert estimate_seconds(self._request("https://youtu.be/x")) is None
+        assert estimate_seconds(_request("https://youtu.be/x")) is None
 
     def test_echo_shows_the_estimate(self):
         text = describe_request(_request("https://youtu.be/x 0:00-0:12"))
