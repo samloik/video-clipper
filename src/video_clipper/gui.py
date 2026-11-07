@@ -262,13 +262,10 @@ body{background:var(--bg);color:var(--ink);font:15px/1.5 var(--sans);
 .panel-head{display:flex;align-items:center;justify-content:space-between;gap:12px}
 .panel pre{margin:0;flex:1;min-height:0;overflow:auto;white-space:pre-wrap;
   font:12.5px/1.65 var(--mono);color:var(--ink-2)}
-.progress{height:4px;border-radius:999px;background:var(--line);overflow:hidden}
-.progress[hidden]{display:none}
-.progress i{display:block;height:100%;width:0;background:var(--accent);
-  transition:width .25s linear}
-.progress.indeterminate i{width:35%;animation:slide 1.2s ease-in-out infinite}
-@keyframes slide{0%{margin-left:-35%}100%{margin-left:100%}}
-@media (prefers-reduced-motion:reduce){.progress.indeterminate i{animation:none;width:100%}}
+.spinner{width:16px;height:16px;border-radius:50%;flex:none;
+  border:2px solid var(--line);border-top-color:var(--accent);
+  animation:spin .9s linear infinite}
+@media (prefers-reduced-motion:reduce){.spinner{animation:none;border-top-color:var(--line-2)}}
 .modal{position:fixed;inset:0;background:#05070acc;backdrop-filter:blur(2px);
   display:flex;align-items:center;justify-content:center;padding:20px;z-index:20}
 .modal[hidden]{display:none}
@@ -437,10 +434,7 @@ input::placeholder{color:#78818e}
   border-radius:var(--r);padding:12px 14px;min-height:46px}
 .status.busy{color:var(--ink)}
 .status.err{border-color:#5f2f28;background:#1e1513;color:var(--err)}
-.dot{width:7px;height:7px;border-radius:50%;background:var(--accent);flex:none;
-  animation:pulse 1.1s ease-in-out infinite}
-@keyframes pulse{0%,100%{opacity:.35}50%{opacity:1}}
-@media (prefers-reduced-motion:reduce){.dot{animation:none}*{transition:none!important}}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
 
 .results{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;
   border:1px solid var(--line);border-radius:var(--r);overflow:hidden}
@@ -642,8 +636,7 @@ input::placeholder{color:#78818e}
         <button class="ghost stop" id="stop" type="button" hidden>Стоп</button>
       </div>
     </div>
-    <div class="progress" id="progress" hidden><i id="bar"></i></div>
-    <div class="status" id="status">Ждёт задание</div>
+    <div class="status" id="status" role="status" aria-live="polite">Ждёт задание</div>
     <div class="eta" id="eta"></div>
     <ul class="results" id="results"></ul>
     <div class="empty" id="empty">
@@ -700,15 +693,16 @@ function setStatus(text, kind) {
   statusEl.className = 'status' + (kind ? ' ' + kind : '');
   statusEl.textContent = '';
   if (kind === 'busy') {
-    const dot = document.createElement('span');
-    dot.className = 'dot';
-    statusEl.append(dot);
+    const spinner = document.createElement('span');
+    spinner.className = 'spinner';
+    spinner.setAttribute('aria-hidden', 'true');
+    statusEl.append(spinner);
   }
   statusEl.append(document.createTextNode(text));
 }
 
 const panelEl = $('panel'), panelText = $('panel-text');
-const progressEl = $('progress'), barEl = $('bar'), etaEl = $('eta');
+const etaEl = $('eta');
 let durationPending = false;
 
 function shortReason(text, limit) {
@@ -907,17 +901,9 @@ stopBtn.addEventListener('click', async () => {
 });
 
 function renderProgress(job) {
-  const running = job.state === 'running';
-  progressEl.hidden = !running;
-  if (!running) { progressEl.classList.remove('indeterminate'); barEl.style.width = '0'; return; }
-  const fraction = typeof job.fraction === 'number' ? job.fraction : null;
-  if (fraction === null) {
-    progressEl.classList.add('indeterminate');
-    barEl.style.width = '';
-  } else {
-    progressEl.classList.remove('indeterminate');
-    barEl.style.width = Math.max(2, Math.round(fraction * 100)) + '%';
-  }
+  // Полосу заменила вертушка перед текстом: она вращается, пока идёт работа,
+  // а процент и стадия и так написаны рядом.
+  statusEl.classList.toggle('working', job.state === 'running');
 }
 
 const choiceEl = $('layout-choice');

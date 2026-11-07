@@ -446,6 +446,24 @@ class TestOpenEnd:
         assert seen["open_ends"] == [True]
 
 
+class TestSpinnerInsteadOfBar:
+    """В панели результата вместо полосы — вращающийся круг перед текстом."""
+
+    def test_page_has_a_spinner_and_no_progress_bar(self):
+        from video_clipper.gui import PAGE
+
+        assert "spinner.className = 'spinner'" in PAGE
+        assert 'id="progress"' not in PAGE
+        assert "barEl" not in PAGE
+        assert ".spinner{" in PAGE and "animation:spin" in PAGE
+        assert "@keyframes spin{" in PAGE
+
+    def test_status_is_announced(self):
+        from video_clipper.gui import PAGE
+
+        assert 'role="status"' in PAGE and 'aria-live="polite"' in PAGE
+
+
 class TestDeadLinkHidesDownload:
     """По закрытому видео и битой ссылке кнопку «скачать 20 с» не предлагаем."""
 
