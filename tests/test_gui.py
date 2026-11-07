@@ -531,6 +531,124 @@ class TestDiskAndHistory:
         assert not old.exists()
 
 
+class TestPreviewForLinks:
+    """Ссылка без скачанного файла: интерфейс должен предложить скачать короткий кусок."""
+
+    URL = "https://youtu.be/ССЫЛКА"
+
+    def _window(self, cfg, start=0.0, end=20.0):
+        folder = cfg.cache_dir / "preview"
+        folder.mkdir(parents=True, exist_ok=True)
+        media = folder / "ССЫЛКА-0.mp4"
+        media.write_bytes(b"\x00" * 4096)
+        (folder / "ССЫЛКА-0.json").write_text(
+            json.dumps(
+                {
+                    "source": self.URL,
+                    "file": media.name,
+                    "start": start,
+                    "end": end,
+                    "duration": 63.0,
+                }
+            ),
+            encoding="utf-8",
+        )
+        return media
+
+    def test_media_tells_the_page_that_frames_are_missing(self, server_factory, cfg, monkeypatch):
+        import video_clipper.gui as gui_module
+
+        monkeypatch.setattr(
+            gui_module, "_remote_media",
+            lambda source, cfg_: {"duration": 63.0, "needs_download": True, "window": False},
+        )
+        base = server_factory(fake_clipper(cfg.output_dir / "c.mp4"))
+        status, body, _ = _get(base + "/api/media?source=" + quote(self.URL, safe=""))
+        data = json.loads(body)
+        assert status == 200
+        assert data["needs_download"] is True and data["duration"] == 63.0
+
+    def test_frame_without_window_explains_itself(self, server_factory, cfg, monkeypatch):
+        import video_clipper.gui as gui_module
+
+        monkeypatch.setattr(
+            gui_module, "_stream_frame",
+            lambda source, cfg_, seconds, width: (b"", "сайт не отдал кадр"),
+        )
+        base = server_factory(fake_clipper(cfg.output_dir / "c.mp4"))
+        status, body, _ = _get(
+            base + "/api/frame?source=" + quote(self.URL, safe="") + "&t=5"
+        )
+        assert status == 409
+        assert "не отдал кадр" in json.loads(body)["error"]
+
+    def test_frame_can_come_straight_from_the_stream(self, server_factory, cfg, monkeypatch):
+        import video_clipper.gui as gui_module
+
+        seen = {}
+
+        def fake_stream(source, cfg_, seconds, width):
+            seen.update(seconds=seconds, width=width)
+            return b"\xff\xd8\xff\xd9", ""
+
+        monkeypatch.setattr(gui_module, "_stream_frame", fake_stream)
+        base = server_factory(fake_clipper(cfg.output_dir / "c.mp4"))
+        status, body, headers = _get(
+            base + "/api/frame?source=" + quote(self.URL, safe="") + "&t=7.5&w=320"
+        )
+        assert status == 200 and headers["Content-Type"] == "image/jpeg"
+        assert body[:2] == b"\xff\xd8"
+        assert seen == {"seconds": 7.5, "width": 320}
+
+    def test_truncated_link_is_named_as_such(self, server_factory, cfg, monkeypatch):
+        import video_clipper.gui as gui_module
+
+        error = RuntimeError("ERROR: [youtube:truncated_id] Incomplete YouTube ID -QQ5yL7tnq.")
+        monkeypatch.setattr(gui_module, "_stream_frame", lambda *a: (b"", gui_module._preview_error(error)))
+        base = server_factory(fake_clipper(cfg.output_dir / "c.mp4"))
+        status, body, _ = _get(
+            base + "/api/frame?source=" + quote(self.URL, safe="") + "&t=0"
+        )
+        assert status == 409
+        assert "обрезанную" in json.loads(body)["error"]
+
+    def test_prepare_endpoint_downloads_a_window(self, server_factory, cfg, monkeypatch):
+        import video_clipper.gui as gui_module
+
+        def fake_ensure(source, cfg_, seconds, progress=None):
+            media = self._window(cfg)
+            return media, 0.0, 20.0
+
+        monkeypatch.setattr(gui_module, "ensure_window", fake_ensure)
+        base = server_factory(fake_clipper(cfg.output_dir / "c.mp4"))
+        status, body, _ = _get(
+            base + "/api/preview", method="POST",
+            data=json.dumps({"source": self.URL, "t": 4}).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        data = json.loads(body)
+        assert status == 200 and data["start"] == 0.0 and data["end"] == 20.0
+
+    def test_window_is_reported_with_offset(self, server_factory, cfg):
+        self._window(cfg)
+        base = server_factory(fake_clipper(cfg.output_dir / "c.mp4"))
+        status, body, _ = _get(
+            base + "/api/media?source=" + quote(self.URL, safe="") + "&t=5"
+        )
+        data = json.loads(body)
+        assert status == 200
+        assert data["window"] is True and data["offset"] == 0.0
+        assert data["window_end"] == 20.0
+        assert data["duration"] == 63.0
+
+    def test_source_serves_the_window(self, server_factory, cfg):
+        self._window(cfg)
+        base = server_factory(fake_clipper(cfg.output_dir / "c.mp4"))
+        url = base + "/api/source?source=" + quote(self.URL, safe="") + "&t=5"
+        status, body, headers = _get(url, headers={"Range": "bytes=0-99"})
+        assert status == 206 and len(body) == 100
+
+
 class TestTimecodeParserInPage:
     """Таймкоды в браузере должны читаться так же, как в боте: «0:02.040» — это 2,04 с."""
 
@@ -602,13 +720,20 @@ class TestPreview:
         )
         assert status == 400
 
-    def test_link_without_download_explains_itself(self, server_factory, cfg):
+    def test_link_without_download_offers_to_fetch_frames(self, server_factory, cfg, monkeypatch):
+        import video_clipper.gui as gui_module
+
+        monkeypatch.setattr(
+            gui_module, "_remote_media",
+            lambda source, cfg_: {"duration": 40.0, "needs_download": True, "window": False},
+        )
         base = server_factory(fake_clipper(cfg.output_dir / "c.mp4"))
         status, body, _ = _get(
             base + "/api/media?source=" + quote("https://youtu.be/НОТВКЭШЕ", safe="")
         )
-        assert status == 409
-        assert "ещё нет на машине" in json.loads(body)["error"]
+        data = json.loads(body)
+        assert status == 200 and data["needs_download"] is True
+        assert data["duration"] == 40.0
 
     def test_file_outside_work_dirs_is_refused(self, server_factory, cfg, tmp_path):
         outsider = tmp_path / "чужой.mp4"

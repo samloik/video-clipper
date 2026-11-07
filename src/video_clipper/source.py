@@ -212,6 +212,42 @@ def prepare_source(
 SECTION_COVERAGE = 0.4
 
 
+def cached_metadata(url: str) -> dict[str, Any]:
+    """Уже известные метаданные без обращения к сети (пусто, если их нет)."""
+    entry = _META_CACHE.get(url)
+    if not entry:
+        return {}
+    stamp, meta = entry
+    if time.time() - stamp > META_TTL:
+        return {}
+    return dict(meta)
+
+
+def download_section(
+    url: str,
+    cfg: Config,
+    start: float,
+    end: float,
+    out_dir: Path,
+    progress: Callable[[str, float | None, str], None] | None = None,
+) -> tuple[Path, float]:
+    """Скачать один участок в отдельный каталог — для предпросмотра кадров.
+
+    Отдельный каталог принципиален: файл участка не должен попасть в общий кэш,
+    иначе следующая нарезка примет его за полное видео.
+    """
+    preview_cfg = cfg.with_overrides(cache_dir=out_dir)
+    src = _download(
+        url,
+        preview_cfg,
+        [(float(start), float(end))],
+        keep_source=True,
+        downloader=None,
+        progress=progress,
+    )
+    return src.path, float(start)
+
+
 def resolve_open_ends_after_download(
     segments: list[Segment], src: "Source"
 ) -> list[Segment]:

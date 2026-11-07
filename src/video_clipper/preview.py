@@ -9,16 +9,26 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import subprocess
+import time
 from fractions import Fraction
 from pathlib import Path
 
 from .config import Config
-from .storage import find_cached_source
+from .storage import find_cached_source, video_id_from_url
 
 log = logging.getLogger(__name__)
 
 FRAME_TIMEOUT = 25
+STREAM_TTL = 600
+
+# Сколько секунд видео качаем, чтобы показать кадры по ссылке. Двадцать секунд —
+# компромисс: хватает на правку начала и конца короткого клипа, и качается быстро.
+PREVIEW_WINDOW = 20.0
+PREVIEW_LEAD = 2.0
+# Больше минуты качать ради кадров уже неприлично — даже если отрезок длинный.
+MAX_PREVIEW_WINDOW = 60.0
 
 
 def local_source(source: str, cfg: Config) -> Path | None:
@@ -33,6 +43,152 @@ def local_source(source: str, cfg: Config) -> Path | None:
             Path(cfg.cache_dir).expanduser(), source, cfg.retention_minutes
         )
     return None
+
+
+def windows_dir(cfg: Config) -> Path:
+    """Кэш коротких участков для предпросмотра — отдельно от полных загрузок."""
+    return Path(cfg.cache_dir).expanduser() / "preview"
+
+
+def find_window(source: str, cfg: Config, seconds: float):
+    """Готовый участок для этого источника, накрывающий ``seconds``."""
+    folder = windows_dir(cfg)
+    if not folder.is_dir():
+        return None
+    for meta_file in folder.glob("*.json"):
+        try:
+            meta = json.loads(meta_file.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if meta.get("source") != source:
+            continue
+        start, end = float(meta.get("start", 0)), float(meta.get("end", 0))
+        if not (start <= seconds <= end):
+            continue
+        media = folder / str(meta.get("file", ""))
+        if media.is_file():
+            return media, start, end, float(meta.get("duration") or 0.0)
+    return None
+
+
+def ensure_window(source: str, cfg: Config, seconds: float, until=None, progress=None):
+    """Кадры для ссылки: найти участок или скачать короткий кусок вокруг времени.
+
+    ``until`` — конец запрошенного отрезка: если он дальше окна по умолчанию,
+    участок качается сразу до него, чтобы кадр конца не требовал второй загрузки.
+    """
+    found = find_window(source, cfg, seconds)
+    if found is not None:
+        if until is None or until <= found[2]:
+            return found
+    from .source import download_section, fetch_metadata
+
+    duration = 0.0
+    try:
+        duration = float(fetch_metadata(source, cfg).get("duration") or 0.0)
+    except Exception as exc:  # метаданные не критичны: возьмём кусок вслепую
+        log.info("Длительность для предпросмотра неизвестна (%s)", exc)
+    start = max(0.0, float(seconds) - PREVIEW_LEAD)
+    span = PREVIEW_WINDOW
+    if until is not None:
+        try:
+            span = max(span, float(until) - start + 1.0)
+        except (TypeError, ValueError):
+            pass
+    span = min(span, MAX_PREVIEW_WINDOW)
+    end = start + span
+    if duration:
+        end = min(end, duration - 0.2)
+        if end <= start and duration > 1:
+            start, end = max(0.0, duration - PREVIEW_WINDOW), duration - 0.2
+    folder = windows_dir(cfg)
+    folder.mkdir(parents=True, exist_ok=True)
+    path, offset = download_section(source, cfg, start, end, folder, progress)
+    suffix = path.suffix or ".mp4"
+    target = folder / f"{video_id_from_url(source) or 'clip'}-{int(offset)}{suffix}"
+    try:
+        if path != target:
+            path.replace(target)
+    except OSError:
+        target = path
+    meta = {
+        "source": source,
+        "file": target.name,
+        "start": start,
+        "end": end,
+        "duration": round(duration, 3),
+    }
+    (folder / f"{target.stem}.json").write_text(
+        json.dumps(meta, ensure_ascii=False), encoding="utf-8"
+    )
+    log.info("Предпросмотр: скачал %.0f–%.0f с в %s", start, end, target.name)
+    return target, start, end
+
+
+def resolve_for_time(source: str, cfg: Config, seconds: float):
+    """Файл, локальное время кадра и границы участка: полный кэш или короткий кусок."""
+    local = local_source(source, cfg)
+    if local is not None:
+        return local, float(seconds), 0.0, 0.0, False
+    window = find_window(source, cfg, seconds)
+    if window is not None:
+        media, start, end, _ = window
+        return media, float(seconds) - start, start, end, True
+    return None
+
+
+_STREAM_CACHE: dict[str, tuple[float, str, dict]] = {}
+
+
+def stream_info(source: str, cfg: Config) -> tuple[str, dict]:
+    """Прямая ссылка на поток: кадр можно взять без скачивания файла.
+
+    Сайт отдаёт временный URL на CDN; он живёт ограниченное время, поэтому
+    кэшируем недолго. Метаданные (длительность, размеры) приходят оттуда же.
+    """
+    cached = _STREAM_CACHE.get(source)
+    if cached and time.time() - cached[0] < STREAM_TTL:
+        return cached[1], cached[2]
+    from .source import _base_opts, _ytdlp_extract
+
+    opts = _base_opts(cfg, min(cfg.default_resolution, 480), None, None)
+    opts = {**opts, "skip_download": True, "format": "best[height<=480]/best"}
+    info = _ytdlp_extract(source, opts) or {}
+    url = info.get("url")
+    if not url:
+        raise RuntimeError("сайт не отдал прямую ссылку на поток")
+    meta = {
+        "duration": float(info.get("duration") or 0.0),
+        "width": int(info.get("width") or 0),
+        "height": int(info.get("height") or 0),
+        "fps": float(info.get("fps") or 0.0),
+    }
+    _STREAM_CACHE[source] = (time.time(), url, meta)
+    return url, meta
+
+
+def grab_stream_frame(source: str, cfg: Config, seconds: float, width: int = 480) -> bytes:
+    """Кадр из потока: ffmpeg читает только нужный кусок через HTTP Range."""
+    from .httpproxy import HttpBridge
+
+    url, _ = stream_info(source, cfg)
+    bridge = None
+    saved = {k: os.environ.get(k) for k in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY")}
+    try:
+        if cfg.proxy:
+            bridge = HttpBridge(cfg.proxy)
+            bridge_url = bridge.start()
+            for key in saved:
+                os.environ[key] = bridge_url
+        return _frame_bytes(url, seconds, width)
+    finally:
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        if bridge is not None:
+            bridge.stop()
 
 
 def probe_media(path: Path) -> dict:
@@ -68,10 +224,14 @@ def probe_media(path: Path) -> dict:
 
 def grab_frame(path: Path, seconds: float, width: int = 480) -> bytes:
     """Один кадр в JPEG. ``-ss`` до ``-i`` — перемотка по ключевым кадрам, быстро."""
+    return _frame_bytes(str(path), seconds, width)
+
+
+def _frame_bytes(target: str, seconds: float, width: int = 480) -> bytes:
     seconds = max(0.0, float(seconds))
     cmd = [
         "ffmpeg", "-hide_banner", "-loglevel", "error",
-        "-ss", f"{seconds:.3f}", "-i", str(path),
+        "-ss", f"{seconds:.3f}", "-i", target,
         "-frames:v", "1",
         "-vf", f"scale={max(32, int(width))}:-2:flags=fast_bilinear",
         "-f", "image2", "-c:v", "mjpeg", "-q:v", "5",
@@ -80,6 +240,6 @@ def grab_frame(path: Path, seconds: float, width: int = 480) -> bytes:
     try:
         out = subprocess.run(cmd, capture_output=True, timeout=FRAME_TIMEOUT)
     except (OSError, subprocess.SubprocessError) as exc:
-        log.info("Кадр не получился (%s, %.2f с): %s", path.name, seconds, exc)
+        log.info("Кадр не получился (%s, %.2f с): %s", target[:80], seconds, exc)
         return b""
     return out.stdout if out.stdout[:2] == b"\xff\xd8" else b""

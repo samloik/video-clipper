@@ -30,7 +30,17 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 from .config import Config, apply_retention_override, load_config
 from .cut import ClipResult, CutCancelled, clamp_horizontal
 from .probe import EnvironmentProblem, check_tools
-from .preview import grab_frame, local_source, probe_media
+from .preview import (
+    ensure_window,
+    find_window,
+    grab_frame,
+    grab_stream_frame,
+    local_source,
+    probe_media,
+    resolve_for_time,
+    stream_info,
+    windows_dir,
+)
 from .segments import (
     Segment,
     clip_filename,
@@ -515,6 +525,7 @@ input::placeholder{color:#78818e}
           <button type="button" class="ghost" id="frame-back" title="на кадр назад">− кадр</button>
           <button type="button" class="ghost" id="frame-fwd" title="на кадр вперёд">+ кадр</button>
           <button type="button" class="ghost" id="step-fwd" title="на секунду вперёд">+1 с</button>
+          <button type="button" class="ghost" id="prep-frames" hidden>скачать 20 с</button>
           <button type="button" class="play" id="play-seg">▶ посмотреть отрезок</button>
         </div>
         <video id="player" playsinline controls hidden></video>
@@ -1052,40 +1063,128 @@ function frameUrl(tc) {
     '&t=' + t.toFixed(3) + '&w=360&_=' + Date.now();
 }
 
+async function loadFrame(img, tc, onMissing) {
+  try {
+    const res = await fetch(frameUrl(tc));
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      img.removeAttribute('src');
+      if (onMissing) onMissing(data.error || '');
+      return;
+    }
+    const blob = await res.blob();
+    if (img.dataset.url) URL.revokeObjectURL(img.dataset.url);
+    const local = URL.createObjectURL(blob);
+    img.dataset.url = local;
+    img.src = local;
+    img.alt = 'кадр ' + tc;
+  } catch (err) {
+    img.removeAttribute('src');
+    if (onMissing) onMissing('');
+  }
+}
+
+function offerWindowDownload(message) {
+  $('prep-frames').hidden = false;
+  previewNoteEl.textContent = message ||
+    'сайт не отдал кадр — можно скачать короткий участок (20 с) и посмотреть по нему';
+}
+
 function refreshThumbs() {
   const source = currentSource();
   if (!source) { previewEl.hidden = true; return; }
   const start = $('start').value.trim(), end = $('end').value.trim();
+  const startSec = Math.max(0, toSeconds(start || '0'));
+  const endSec = end && end !== '*' ? toSeconds(end) : null;
   $('cap-start').textContent = start || '0:00';
   $('cap-end').textContent = end || '—';
-  const startImg = $('thumb-start'), endImg = $('thumb-end');
-  startImg.src = frameUrl(start || '0');
-  if (end && end !== '*') endImg.src = frameUrl(end);
-  else { endImg.removeAttribute('src'); endImg.alt = 'конец не задан'; }
+  const missing = (error) => {
+    if (error && /обрезан/i.test(error)) {
+      $('prep-frames').hidden = true;
+      previewNoteEl.textContent = error;
+      return;
+    }
+    offerWindowDownload(error ? 'кадров нет: ' + error : '');
+  };
+  loadFrame($('thumb-start'), start || '0', missing);
+  if (endSec === null) {
+    const endImg = $('thumb-end');
+    endImg.removeAttribute('src');
+    endImg.alt = 'конец не задан';
+  } else {
+    loadFrame($('thumb-end'), end, missing);
+  }
 }
+
+let preparingFor = null;
+const preparedKeys = new Set();
 
 async function loadMedia() {
   const source = currentSource();
   if (!source) { previewEl.hidden = true; mediaInfo = null; return; }
   try {
-    const res = await fetch('/api/media?source=' + encodeURIComponent(source));
+    const res = await fetch('/api/media?source=' + encodeURIComponent(source) +
+      '&t=' + Math.max(0, toSeconds($('start').value.trim() || '0')).toFixed(2));
     const data = await res.json();
     if (!res.ok) {
       previewEl.hidden = true;
       mediaInfo = null;
-      previewNoteEl.textContent = '';
+      previewNoteEl.textContent = data.error || '';
       return;
     }
     mediaInfo = data;
     previewEl.hidden = false;
-    previewNoteEl.textContent = data.duration
-      ? 'в ролике ' + fmtSeconds(data.duration) +
-        (data.fps ? ' · ' + data.fps.toFixed(2).replace('.', ',') + ' кадр/с' : '')
+    $('play-seg').disabled = !!data.needs_download;
+    $('play-seg').title = data.needs_download
+      ? 'проигрывание доступно после первой нарезки: файл останется в кэше'
       : '';
+    if (data.needs_download) {
+      // файл не нужен: кадр берётся из потока прямо на сервере
+      previewNoteEl.textContent = 'кадры тяну из потока — файл скачивать не нужно';
+      refreshThumbs();
+      return;
+    }
+    previewNoteEl.textContent = data.window
+      ? (data.unknown_duration
+          ? 'кадры из участка ' + fmtTC(data.offset) + '–' + fmtTC(data.window_end) +
+            ' · длительность ролика сайт не отдал'
+          : 'кадры из короткого участка · ролик ' + fmtSeconds(data.duration))
+      : (data.duration
+          ? 'в ролике ' + fmtSeconds(data.duration) +
+            (data.fps ? ' · ' + data.fps.toFixed(2).replace('.', ',') + ' кадр/с' : '')
+          : '');
     refreshThumbs();
   } catch (err) {
     previewEl.hidden = true;
   }
+}
+
+async function preparePreview(atSeconds, untilSeconds) {
+  const source = currentSource();
+  const t = Math.max(0, atSeconds === undefined ? toSeconds($('start').value.trim() || '0') : atSeconds);
+  const until = (untilSeconds === undefined || untilSeconds === null) ? null : untilSeconds;
+  const key = source + '@' + Math.round(t) + '-' + (until === null ? 'auto' : Math.round(until));
+  if (!source || preparingFor || preparedKeys.has(key)) return;
+  preparingFor = key;
+  preparedKeys.add(key);
+  previewNoteEl.textContent = 'скачиваю короткий участок для кадров — обычно 20–40 с';
+  setStatus('Готовлю кадры: качаю первые 20 секунд ролика', 'busy');
+  try {
+    const res = await fetch('/api/preview', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({source, t, until})
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'не удалось скачать участок');
+    setStatus('Кадры готовы · участок ' + fmtSeconds(data.start) + '–' + fmtSeconds(data.end));
+  } catch (err) {
+    previewNoteEl.textContent = 'кадры не получились: ' + err.message;
+    setStatus('Кадры не получились: ' + err.message, 'err');
+    preparingFor = null;
+    return;
+  }
+  preparingFor = null;
+  loadMedia();
 }
 
 function schedulePreview() {
@@ -1114,6 +1213,14 @@ $('step-fwd').addEventListener('click', () => stepField(1));
 $('frame-back').addEventListener('click', () => stepField(-(mediaInfo && mediaInfo.fps ? 1 / mediaInfo.fps : 0.04)));
 $('frame-fwd').addEventListener('click', () => stepField(mediaInfo && mediaInfo.fps ? 1 / mediaInfo.fps : 0.04));
 
+$('prep-frames').addEventListener('click', () => {
+  const startSec = Math.max(0, toSeconds($('start').value.trim() || '0'));
+  const endRaw = $('end').value.trim();
+  const endSec = endRaw && endRaw !== '*' ? toSeconds(endRaw) : null;
+  $('prep-frames').hidden = true;
+  preparePreview(startSec, endSec);
+});
+
 $('play-seg').addEventListener('click', () => {
   const source = currentSource();
   if (!source) { setStatus('Сначала выбери файл или ссылку', 'err'); return; }
@@ -1128,17 +1235,21 @@ $('play-seg').addEventListener('click', () => {
     return;
   }
   playerEl.hidden = false;
-  playerEl.dataset.start = String(start);
-  playerEl.dataset.end = String(end);
-  playerEl.onloadedmetadata = () => { playerEl.currentTime = start; };
+  const offset = (mediaInfo && mediaInfo.offset) ? mediaInfo.offset : 0;
+  const localStart = Math.max(0, start - offset);
+  const localEnd = Math.max(localStart + 0.2, end - offset);
+  playerEl.dataset.start = String(localStart);
+  playerEl.dataset.end = String(localEnd);
+  playerEl.onloadedmetadata = () => { playerEl.currentTime = localStart; };
   playerEl.muted = false;
   playerEl.ontimeupdate = () => {
-    if (playerEl.currentTime >= end) {
+    if (playerEl.currentTime >= localEnd) {
       playerEl.pause();
-      playerEl.currentTime = Math.max(start, end - 0.05);
+      playerEl.currentTime = Math.max(localStart, localEnd - 0.05);
     }
   };
-  playerEl.src = '/api/source?source=' + encodeURIComponent(source) + '&_=' + Date.now();
+  playerEl.src = '/api/source?source=' + encodeURIComponent(source) +
+    '&t=' + start.toFixed(2) + '&_=' + Date.now();
   // play() зовём прямо в обработчике клика: после await браузер уже не считает это жестом
   playerEl.play().catch(() => {
     previewNoteEl.textContent = 'браузер не дал автозапуск — нажми ▶ в плеере';
@@ -1420,6 +1531,51 @@ def auto_horizontal(source: str, cfg: Config) -> tuple[float, str]:
     span = info.width - window_w
     position = clamp_horizontal((center - window_w / 2) / span if span > 0 else 0.5)
     return position, f"содержимое {width}px с {left}px → окно {position * 100:.0f}%"
+
+
+def _stream_frame(source: str, cfg: Config, seconds: float, width: int):
+    """Кадр из прямого потока и причина, если он не вышел."""
+    try:
+        return grab_stream_frame(source, cfg, seconds, width), ""
+    except Exception as exc:  # noqa: BLE001 - сеть, бот-чек, битая ссылка
+        log.info("Кадр из потока не получился: %s", exc)
+        return b"", _preview_error(exc)
+
+
+def _preview_error(exc: Exception) -> str:
+    """Понятная причина, почему кадры не скачались."""
+    text = str(exc)
+    if "Incomplete YouTube ID" in text or "looks truncated" in text:
+        return "ссылка похожа на обрезанную — скопируй её из адресной строки целиком"
+    if "Sign in to confirm" in text:
+        return (
+            "сайт просит подтвердить, что мы не робот. Это ограничение IP и проходит само: "
+            "повтори через 10–15 минут"
+        )
+    return f"не удалось скачать кусок для кадров: {text}"
+
+
+def _remote_media(source: str, cfg: Config) -> dict:
+    """Что известно о ссылке до скачивания: длительность из метаданных сайта."""
+    duration = 0.0
+    if source.startswith(("http://", "https://")):
+        # только из кэша: запрос к сайту занимает секунды, страница ждать не должна
+        from .source import cached_metadata
+
+        try:
+            duration = float(cached_metadata(source).get("duration") or 0.0)
+        except Exception:  # noqa: BLE001 - метаданные не критичны
+            duration = 0.0
+    return {
+        "duration": round(duration, 3),
+        "width": 0,
+        "height": 0,
+        "fps": 0.0,
+        "offset": 0.0,
+        "needs_download": True,
+        "stream": True,
+        "window": False,
+    }
 
 
 def _allowed_media(path: Path, cfg: Config) -> bool:
@@ -1831,7 +1987,8 @@ GUI_HELP = """Как пользоваться
   Под диапазоном — кадры начала и конца: видно, что попадёт в клип, ещё до нарезки.
      «± кадр» и «±1 с» двигают границу (шаг кадра берётся из файла), «посмотреть отрезок»
      проигрывает ровно его — по исходнику, без нарезки.
-     Для ссылки предпросмотр появится после первой нарезки: файл останется в кэше.
+     По ссылке кадры берутся из потока — файл скачивать не нужно; если сайт не отдал
+     поток, появится кнопка «скачать 20 с» и кадры возьмутся из короткого участка.
 
   «вертикально 9:16» — кадр под смартфон, фон на выбор: обрезать бока или размытый.
      Источник 720p остаётся 720×1280 — без апскейла и мыла.
@@ -2092,34 +2249,61 @@ def make_handler(
             if path in ("/api/media", "/api/frame", "/api/source"):
                 query = parse_qs(urlparse(self.path).query)
                 source = (query.get("source") or [""])[0]
-                local = local_source(source, cfg)
-                if local is None:
+                raw_t = (query.get("t") or [""])[0]
+                if raw_t:
+                    try:
+                        wanted = float(raw_t)
+                    except (TypeError, ValueError):
+                        self._error(400, "не понял время кадра")
+                        return
+                else:
+                    wanted = 0.0
+                try:
+                    frame_width = int((query.get("w") or ["480"])[0] or 480)
+                except ValueError:
+                    frame_width = 480
+                resolved = resolve_for_time(source, cfg, wanted)
+                if resolved is None:
+                    if path == "/api/media":
+                        # ссылка: кадры можно взять прямо из потока, файл не нужен
+                        self._send(200, _dumps(_remote_media(source, cfg)))
+                        return
+                    if source.startswith(("http://", "https://")):
+                        frame, reason = _stream_frame(source, cfg, wanted, frame_width)
+                        if frame:
+                            self._send(200, frame, "image/jpeg")
+                            return
+                        if reason:
+                            self._error(409, reason)
+                            return
                     self._error(
                         409,
-                        "источника ещё нет на машине: нарежь один отрезок — "
-                        "файл скачается и останется в кэше для предпросмотра",
+                        "кадров для этого места ещё нет: короткий участок не скачан",
                     )
                     return
+                local, local_time, offset, window_end, is_window = resolved
                 if not _allowed_media(local, cfg):
                     self._error(403, "файл вне рабочих каталогов")
                     return
                 if path == "/api/media":
-                    self._send(200, _dumps(probe_media(local)))
+                    info = probe_media(local)
+                    info["offset"] = offset
+                    info["needs_download"] = False
+                    info["window"] = is_window
+                    info["window_end"] = window_end or (offset + (info.get("duration") or 0))
+                    if is_window:
+                        # длительность ролика лежит в паспорте участка: сеть не нужна
+                        info["clip_duration"] = info.get("duration")
+                        window = find_window(source, cfg, wanted)
+                        full = float(window[3]) if window else 0.0
+                        info["duration"] = full
+                        info["unknown_duration"] = not full
+                    self._send(200, _dumps(info))
                     return
                 if path == "/api/source":
                     self._serve_media(local)
                     return
-                raw_t = (query.get("t") or ["0"])[0]
-                try:
-                    seconds = float(raw_t)
-                except (TypeError, ValueError):
-                    self._error(400, "не понял время кадра")
-                    return
-                try:
-                    width = int((query.get("w") or ["480"])[0] or 480)
-                except ValueError:
-                    width = 480
-                frame = grab_frame(local, seconds, width)
+                frame = grab_frame(local, local_time, frame_width)
                 if not frame:
                     self._error(404, "кадр не получился")
                     return
@@ -2243,6 +2427,41 @@ def make_handler(
                 self._send(200, _dumps({"state": "cancelling"}))
                 return
 
+            if parsed.path == "/api/preview":
+                try:
+                    data = json.loads(body.decode("utf-8") or "{}")
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    data = {}
+                source = str(data.get("source") or "")
+                if not source:
+                    self._error(400, "нужна ссылка или файл")
+                    return
+                try:
+                    seconds = float(data.get("t") or 0)
+                except (TypeError, ValueError):
+                    seconds = 0.0
+                until = data.get("until")
+                try:
+                    until = float(until) if until is not None else None
+                except (TypeError, ValueError):
+                    until = None
+                try:
+                    path, start, end = ensure_window(source, cfg, seconds, until)
+                except Exception as exc:  # сеть, cookies, бот-чек — показываем причину
+                    self._error(502, _preview_error(exc))
+                    return
+                self._send(
+                    200,
+                    _dumps(
+                        {
+                            "file": path.name,
+                            "start": round(start, 3),
+                            "end": round(end, 3),
+                            "folder": str(windows_dir(cfg)),
+                        }
+                    ),
+                )
+                return
             if parsed.path == "/api/vertical":
                 try:
                     data = json.loads(body or b"{}")
