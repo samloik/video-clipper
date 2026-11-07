@@ -280,6 +280,13 @@ class TestDownload:
 
 
 class TestServicePanel:
+    def test_hidden_panel_really_hides(self):
+        from video_clipper.gui import PAGE
+
+        assert ".panel[hidden]{display:none}" in PAGE, (
+            "у .panel задан display:flex — без этого правила атрибут hidden не работает"
+        )
+
     def test_panel_lives_in_the_result_column(self):
         from video_clipper.gui import PAGE
 
@@ -300,12 +307,39 @@ class TestServiceEndpoints:
         assert "оригиналы" in text and "клипы" in text
         assert "слушаю" in text
 
-    def test_info_returns_the_memo(self, server_factory, tmp_path):
+    def test_info_is_written_for_the_gui_not_the_chat(self, server_factory, tmp_path):
         base = server_factory(fake_clipper(tmp_path / "c.mp4"))
         status, body = get(base, "/api/info")
         assert status == 200
         text = json.loads(body)["text"]
-        assert "ВЕБ-ИНТЕРФЕЙС" in text and "/info" in text
+        assert "Нарезать" in text, "подсказка должна говорить про кнопку GUI"
+        assert "4 ГБ" in text and "Таймкоды" in text
+        assert "/info" not in text and "Пришли" not in text, "это памятка бота, а не GUI"
+        assert "Очистить" in text
+
+    def test_job_gets_a_time_estimate_before_any_work(self, server_factory, tmp_path):
+        seen = {}
+
+        def clipper(source, segments, fast, cfg, progress=None, vertical=False, layout="crop"):
+            return []
+
+        base = server_factory(clipper)
+        media = tmp_path / "v.mp4"
+        media.write_bytes(b"x")
+        status, body = post_json(
+            base, "/api/clip",
+            {"source": str(media), "start": "0:00", "end": "0:20", "fast": True},
+        )
+        assert status == 202
+        for _ in range(50):
+            job = json.loads(get(base, f"/api/jobs/{body['job_id']}")[1])
+            if job.get("estimate"):
+                break
+            time.sleep(0.05)
+        low, high = job["estimate"]
+        assert 0 < low < high
+        assert high >= 20 * 0.26, "20 с клипа не могут обещать меньше секунды на секунду работы"
+        assert high <= 20 * 3, "и не могут обещать часы"
 
     def test_clean_removes_files(self, server_factory, cfg, tmp_path):
         cfg.cache_dir.mkdir(parents=True, exist_ok=True)

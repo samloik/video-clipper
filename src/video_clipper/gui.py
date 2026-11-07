@@ -32,6 +32,9 @@ from .source import is_url
 log = logging.getLogger("video_clipper")
 
 MAX_UPLOAD = 4 * 1024 * 1024 * 1024  # 4 GB
+# Эстимейт для GUI: локальный файл не надо качать, поэтому накладные меньше.
+ESTIMATE_LOCAL_OVERHEAD = 4.0
+ESTIMATE_URL_OVERHEAD = 15.0
 SESSION_COOKIE = "vc_session"
 SESSION_MAX_AGE = 12 * 3600
 LOGIN_WINDOW = 600.0
@@ -158,6 +161,7 @@ body{background:var(--bg);color:var(--ink);font:15px/1.5 var(--sans);
 .panel{display:flex;flex-direction:column;gap:12px;flex:1;min-height:0;
   border:1px solid var(--line);border-radius:var(--r);background:var(--panel);
   padding:14px 16px}
+.panel[hidden]{display:none}
 .panel-head{display:flex;align-items:center;justify-content:space-between;gap:12px}
 .panel pre{margin:0;flex:1;min-height:0;overflow:auto;white-space:pre-wrap;
   font:12.5px/1.65 var(--mono);color:var(--ink-2)}
@@ -269,6 +273,8 @@ input::placeholder{color:#78818e}
 
 .status{color:var(--ink-3);font-size:13.5px;min-height:22px;display:flex;
   align-items:center;gap:9px;padding:0}
+.eta{font-size:12px;color:var(--ink-3);margin:-2px 0 10px;min-height:15px;
+  font-variant-numeric:tabular-nums}
 .status.busy,.status.err{border:1px solid var(--line);background:var(--panel);
   border-radius:var(--r);padding:12px 14px;min-height:46px}
 .status.busy{color:var(--ink)}
@@ -386,7 +392,7 @@ input::placeholder{color:#78818e}
       </label>
       <div class="layout-choice" id="layout-choice" hidden>
         <span>фон:</span>
-        <button type="button" class="seg on" data-layout="crop">обрезать боки</button>
+        <button type="button" class="seg on" data-layout="crop">обрезать бока</button>
         <button type="button" class="seg" data-layout="blur">размытый фон</button>
       </div>
     </div>
@@ -401,6 +407,7 @@ input::placeholder{color:#78818e}
     </div>
     <div class="progress" id="progress" hidden><i id="bar"></i></div>
     <div class="status" id="status">Ждёт задание</div>
+    <div class="eta" id="eta"></div>
     <ul class="results" id="results"></ul>
     <div class="empty" id="empty">
       <b>Здесь появятся клипы</b>
@@ -444,7 +451,40 @@ function setStatus(text, kind) {
 }
 
 const panelEl = $('panel'), panelText = $('panel-text');
-const progressEl = $('progress'), barEl = $('bar');
+const progressEl = $('progress'), barEl = $('bar'), etaEl = $('eta');
+
+function fmtSeconds(value) {
+  const s = Math.round(value);
+  if (s < 60) return s + ' с';
+  const m = Math.floor(s / 60), rest = s % 60;
+  return rest ? m + ' мин ' + rest + ' с' : m + ' мин';
+}
+
+function renderEta(job) {
+  if (job.state === 'running') {
+    if (Array.isArray(job.estimate) && job.estimate.length === 2) {
+      const [totalLow, totalHigh] = job.estimate;
+      const done = typeof job.fraction === 'number' ? Math.min(Math.max(job.fraction, 0), 1) : 0;
+      const rest = 1 - done;
+      if (done > 0.02) {
+        etaEl.textContent = 'осталось примерно ' + fmtSeconds(totalLow * rest) +
+          ' – ' + fmtSeconds(totalHigh * rest);
+      } else {
+        etaEl.textContent = 'весь клип примерно ' + fmtSeconds(totalLow) +
+          ' – ' + fmtSeconds(totalHigh);
+      }
+    } else {
+      etaEl.textContent = 'считаю оценку…';
+    }
+    return;
+  }
+  if (job.state === 'done') {
+    etaEl.textContent = 'заняло ' + fmtSeconds((Date.now() - startedAt) / 1000);
+    return;
+  }
+  if (job.state === 'error') { etaEl.textContent = ''; return; }
+  etaEl.textContent = '';
+}
 
 function showPanel(title, text) {
   $('panel-title').textContent = title;
@@ -656,6 +696,7 @@ async function run() {
   goBtn.disabled = true; goBtn.textContent = 'Режу…';
   setStatus('Ставлю задание в очередь', 'busy');
   startTimer();
+  etaEl.textContent = 'считаю оценку…';
   try {
     const res = await fetch('/api/clip', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body) });
     const data = await res.json();
@@ -678,15 +719,17 @@ async function poll(id) {
   for (;;) {
     const job = await (await fetch('/api/jobs/' + id)).json();
     renderProgress(job);
+    renderEta(job);
     if (job.state === 'running') {
       const percent = typeof job.fraction === 'number' ? ' · ' + Math.round(job.fraction * 100) + '%' : '';
       const stage = { download: 'Скачиваю', encode: 'Кодирую' }[job.stage] || 'Работаю';
       const detail = job.detail ? ' · ' + job.detail : '';
       setStatus(stage + percent + detail, 'busy');
     }
-    if (job.state === 'error') { renderProgress(job); setStatus(job.error || 'ошибка', 'err'); return; }
+    if (job.state === 'error') { renderProgress(job); renderEta(job); setStatus(job.error || 'ошибка', 'err'); return; }
     if (job.state === 'done') {
       renderProgress(job);
+      renderEta(job);
       hidePanel();
       setStatus('Готово · ' + plural(job.results.length, 'файл', 'файла', 'файлов'));
       job.results.forEach((r, i) => {
@@ -755,6 +798,28 @@ def _job_snapshot(job_id: str) -> dict[str, Any] | None:
         return dict(job) if job else None
 
 
+def _estimate(
+    source: str, segments: list[Segment], fast: bool, vertical: bool, layout: str
+) -> tuple[float, float] | None:
+    """Bot's model, minus the download part when the file is already on disk."""
+    from .bot import DOWNLOAD_RATE, ENCODE_RATE
+
+    total = sum(seg.duration for seg in segments)
+    if total <= 0:
+        return None
+    per_second = ENCODE_RATE["fast" if fast else "accurate"]
+    overhead = ESTIMATE_LOCAL_OVERHEAD
+    if is_url(source):
+        per_second += DOWNLOAD_RATE
+        overhead = ESTIMATE_URL_OVERHEAD
+    if vertical:
+        per_second *= 1.25
+    if layout == "blur":
+        per_second *= 1.15
+    work = overhead + total * per_second
+    return work * 0.55, work * 1.7
+
+
 def _run_job(
     job_id: str,
     source: str,
@@ -766,7 +831,14 @@ def _run_job(
     layout: str = "crop",
 ) -> None:
     try:
-        _job_update(job_id, message="Готовлю источник...", stage="download", fraction=None)
+        estimate = _estimate(source, segments, fast, vertical, layout)
+        _job_update(
+            job_id,
+            message="Готовлю источник...",
+            stage="download",
+            fraction=None,
+            estimate=list(estimate) if estimate else None,
+        )
 
         def progress(*args) -> None:
             """Accept both the bot-style (stage, fraction, detail) and a plain message."""
@@ -909,11 +981,52 @@ def status_text(cfg: Config) -> str:
     return "\n".join(lines)
 
 
-def info_text(cfg: Config) -> str:
-    """Та же памятка, что бот отдаёт по /info."""
-    from .bot import build_info
+GUI_HELP = """Как пользоваться
+  1. Слева укажи источник: перетащи файл или вставь ссылку (YouTube, Rutube, VK, TikTok).
+  2. Задай начало и конец отрезка. Кнопки 15 с / 30 с / 1 мин / 3 мин ставят длительность
+     от начала, «сброс» возвращает конец к началу ролика.
+  3. Нажми «Нарезать» — справа появится клип, его можно скачать.
 
-    return build_info(cfg)
+Таймкоды
+  45        — 45 секунд
+  1:12      — 1 мин 12 с
+  1:02:03   — 1 ч 2 мин 3 с
+  Вместо «:» подойдёт , . / \\ — «1/12» это 1 мин 12 с.
+  «1:00=0:30» — с 1:00 ровно тридцать секунд: после «=» не конец, а длительность.
+
+Режимы
+  «без перекодирования» — режет по ключевому кадру: секунды вместо минут, зато начало
+     может уехать до ближайшего ключевого кадра.
+  «вертикально 9:16» — кадр под смартфон, фон на выбор: обрезать бока или размытый.
+     Источник 720p остаётся 720×1280 — без апскейла и мыла.
+
+Хранение
+  Файл до {max_upload} ГБ. Скачанные оригиналы и готовые клипы живут {minutes} мин после
+  последнего использования и потом удаляются сами. «Очистить» в шапке удаляет сразу.
+
+Служебное
+  Адрес: {url}
+  Пароль: {password}
+  «Статус» в шапке — что лежит на машине прямо сейчас."""
+
+
+def info_text(cfg: Config) -> str:
+    """Памятка под веб-интерфейс, а не под чат бота."""
+    password = cfg.gui_password_file
+    if password and Path(str(password)).expanduser().is_file():
+        where = str(Path(str(password)).expanduser())
+    elif password:
+        where = f"{password} (файла пока нет)"
+    else:
+        where = "не задан — вход только с localhost"
+    from .bot import gui_url
+
+    return GUI_HELP.format(
+        max_upload=round(MAX_UPLOAD / 1024**3),
+        minutes=cfg.retention_minutes,
+        url=gui_url(cfg),
+        password=where,
+    )
 
 
 def clean_text(cfg: Config) -> str:
