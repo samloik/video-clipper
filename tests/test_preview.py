@@ -187,11 +187,15 @@ class TestStream:
             lambda url, opts: {
                 "url": "https://cdn.example/x.mp4",
                 "duration": 63.0, "width": 360, "height": 450, "fps": 30.0,
+                "http_headers": {"User-Agent": "Mozilla/5.0 test"},
             },
         )
         url, meta = stream_info("https://youtu.be/STREAM1", self._cfg(tmp_path))
         assert url == "https://cdn.example/x.mp4"
-        assert meta == {"duration": 63.0, "width": 360, "height": 450, "fps": 30.0}
+        assert meta == {
+            "duration": 63.0, "width": 360, "height": 450, "fps": 30.0,
+            "user_agent": "Mozilla/5.0 test",
+        }
 
     def test_stream_info_is_cached(self, tmp_path, monkeypatch):
         import video_clipper.source as source_module

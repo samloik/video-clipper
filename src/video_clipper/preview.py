@@ -225,9 +225,33 @@ def stream_info(source: str, cfg: Config) -> tuple[str, dict]:
         return cached[1], cached[2]
     from .source import _base_opts, _ytdlp_extract
 
-    opts = _base_opts(cfg, min(cfg.default_resolution, 480), None, None)
-    opts = {**opts, "skip_download": True, "format": "best[height<=480]/best"}
-    info = _ytdlp_extract(source, opts) or {}
+    base = _base_opts(cfg, min(cfg.default_resolution, 480), None, None)
+    base = {
+        **base,
+        "skip_download": True,
+        # сначала видеодорожка, потом что угодно: для кадра звук не нужен
+        "format": "bv*[height<=480]/b[height<=480]/bv*/b",
+        "socket_timeout": 10,
+    }
+    # Один клиент за попытку. Перебор клиентов подряд злит YouTube: каждый лишний
+    # запрос повышает шанс бот-чека, поэтому android, затем (с паузой) mweb.
+    info: dict = {}
+    last_error: Exception | None = None
+    for index, client in enumerate(("android", "mweb")):
+        opts = dict(base)
+        opts["extractor_args"] = {"youtube": {"player_client": [client]}}
+        if index:
+            time.sleep(2)
+        try:
+            info = _ytdlp_extract(source, opts) or {}
+        except Exception as exc:  # noqa: BLE001 - причина уйдёт наверх
+            last_error = exc
+            log.info("Поток через %s не получен: %s", client, str(exc)[:120])
+            continue
+        if info.get("url"):
+            break
+    if not info.get("url") and last_error is not None:
+        raise last_error
     url = info.get("url")
     if not url:
         raise RuntimeError("сайт не отдал прямую ссылку на поток")
@@ -236,6 +260,9 @@ def stream_info(source: str, cfg: Config) -> tuple[str, dict]:
         "width": int(info.get("width") or 0),
         "height": int(info.get("height") or 0),
         "fps": float(info.get("fps") or 0.0),
+        # CDN отдаёт видео только своему клиенту: с чужим User-Agent ffmpeg
+        # получает пустой поток — это проверено на живом ролике
+        "user_agent": (info.get("http_headers") or {}).get("User-Agent", ""),
     }
     _STREAM_CACHE[source] = (time.time(), url, meta)
     return url, meta
@@ -245,7 +272,7 @@ def grab_stream_frame(source: str, cfg: Config, seconds: float, width: int = 480
     """Кадр из потока: ffmpeg читает только нужный кусок через HTTP Range."""
     from .httpproxy import HttpBridge
 
-    url, _ = stream_info(source, cfg)
+    url, meta = stream_info(source, cfg)
     bridge = None
     saved = {k: os.environ.get(k) for k in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY")}
     try:
@@ -254,7 +281,9 @@ def grab_stream_frame(source: str, cfg: Config, seconds: float, width: int = 480
             bridge_url = bridge.start()
             for key in saved:
                 os.environ[key] = bridge_url
-        return _frame_bytes(url, seconds, width, cache_key=source)
+        return _frame_bytes(
+            url, seconds, width, cache_key=source, user_agent=meta.get("user_agent", "")
+        )
     finally:
         for key, value in saved.items():
             if value is None:
@@ -302,12 +331,18 @@ def grab_frame(path: Path, seconds: float, width: int = 480) -> bytes:
 
 
 def _frame_bytes(
-    target: str, seconds: float, width: int = 480, cache_key: str | None = None
+    target: str,
+    seconds: float,
+    width: int = 480,
+    cache_key: str | None = None,
+    user_agent: str = "",
 ) -> bytes:
     key = cache_key or target
     seconds = max(0.0, float(seconds))
-    cmd = [
-        "ffmpeg", "-hide_banner", "-loglevel", "error",
+    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error"]
+    if user_agent:
+        cmd += ["-user_agent", user_agent]
+    cmd += [
         "-ss", f"{seconds:.3f}", "-i", target,
         "-frames:v", "1",
         "-vf", f"scale={max(32, int(width))}:-2:flags=fast_bilinear",
