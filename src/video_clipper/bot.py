@@ -576,21 +576,30 @@ def describe_request(
 class ProgressReporter:
     """One chat message that is edited as the job advances.
 
-    Telegram rate-limits edits, and a hook fires many times per second, so the
-    text is rewritten at most once per ``min_interval`` seconds.
+    Two sources feed it: real progress from yt-dlp/ffmpeg, and a heartbeat
+    thread. The heartbeat is not a luxury: a section download is executed by
+    yt-dlp through ffmpeg, which reports nothing, so without it the chat stays
+    silent for minutes while the job is happily working.
     """
 
-    def __init__(self, bot, chat_id: int, min_interval: float = 8.0):
+    def __init__(self, bot, chat_id: int, min_interval: float = 8.0, heartbeat: float = 10.0):
         self.bot = bot
         self.chat_id = chat_id
         self.min_interval = min_interval
+        self.heartbeat = heartbeat
         self.message_id: int | None = None
         self._last_at = 0.0
         self._last_text = ""
+        self._stage = ""
+        self._fraction: float | None = None
+        self._detail = ""
+        self._started_at = time.monotonic()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
 
     @staticmethod
     def render(stage: str, fraction: float | None, detail: str) -> str:
-        head = {"download": "Скачиваю", "encode": "Кодирую"}.get(stage, stage)
+        head = {"download": "Скачиваю", "encode": "Кодирую"}.get(stage, stage or "Работаю")
         parts = [head]
         if fraction is not None:
             parts.append(f"{fraction * 100:.0f}%")
@@ -598,28 +607,68 @@ class ProgressReporter:
             parts.append(detail)
         return "⏳ " + " · ".join(parts)
 
+    def _text(self) -> str:
+        text = self.render(self._stage, self._fraction, self._detail)
+        elapsed = time.monotonic() - self._started_at
+        if elapsed >= self.heartbeat:
+            from .timecode import human_duration
+
+            text += f" · уже {human_duration(elapsed)}"
+        return text
+
+    def _send(self, text: str) -> bool:
+        try:
+            result = self.bot.send_message(self.chat_id, text)
+        except Exception:  # noqa: BLE001 — status must never break the job
+            return False
+        self.message_id = result.get("message_id") if isinstance(result, dict) else None
+        self._last_at, self._last_text = time.monotonic(), text
+        return True
+
+    def start(self, stage: str = "", detail: str = "") -> None:
+        """Post the first status message and keep it ticking."""
+        self._stage, self._detail = stage, detail
+        self._send(self._text())
+        self._thread = threading.Thread(target=self._beat, daemon=True, name="progress")
+        self._thread.start()
+
+    def _beat(self) -> None:
+        while not self._stop.wait(self.heartbeat):
+            self._edit(force=True)
+
+    def _edit(self, force: bool) -> None:
+        if self.message_id is None or self._stop.is_set():
+            return
+        text = self._text()
+        if text == self._last_text:
+            return
+        if not force and time.monotonic() - self._last_at < self.min_interval:
+            return
+        self._last_at, self._last_text = time.monotonic(), text
+        try:
+            self.bot.edit_message_text(self.chat_id, self.message_id, text)
+        except Exception:  # noqa: BLE001
+            pass
+
     def update(self, stage: str, fraction: float | None = None, detail: str = "") -> None:
-        text = self.render(stage, fraction, detail)
-        now = time.monotonic()
+        self._stage, self._fraction, self._detail = stage, fraction, detail
+        if self._stop.is_set():
+            return
         if self.message_id is None:
-            try:
-                result = self.bot.send_message(self.chat_id, text)
-                self.message_id = result.get("message_id") if isinstance(result, dict) else None
-            except TelegramError:
-                return
-            self._last_at, self._last_text = now, text
+            self._send(self._text())
             return
-        done = fraction is not None and fraction >= 0.999
-        if text == self._last_text or (not done and now - self._last_at < self.min_interval):
-            return
-        self._last_at, self._last_text = now, text
-        self.bot.edit_message_text(self.chat_id, self.message_id, text)
+        self._edit(force=fraction is not None and fraction >= 0.999)
 
     def finish(self, text: str = "✅ Готово") -> None:
-        if self.message_id is None or text == self._last_text:
-            return
-        self._last_text = text
-        self.bot.edit_message_text(self.chat_id, self.message_id, text)
+        self._stop.set()
+        if self.message_id is None:
+            self._send(text)
+        elif text != self._last_text:
+            self._last_text = text
+            try:
+                self.bot.edit_message_text(self.chat_id, self.message_id, text)
+            except Exception:  # noqa: BLE001
+                pass
 
 
 def segments_from_text(body: str) -> list[Segment]:
@@ -816,6 +865,7 @@ def handle_message(bot, cfg: Config, message: dict, clipper=None) -> None:
     bot.send_message(chat_id, describe_request(request, duration=duration, title=title))
     bot.send_chat_action(chat_id, "record_video")
     reporter = ProgressReporter(bot, chat_id)
+    reporter.start("download", "готовлю источник")
 
     job: dict | None = None
     try:

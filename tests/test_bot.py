@@ -51,6 +51,19 @@ class TestProgress:
         reporter.finish("✅ Готово")
         assert bot.edits[-1][2] == "✅ Готово"
 
+    def test_heartbeat_keeps_the_message_alive_when_nothing_reports(self):
+        """Section downloads run inside ffmpeg and report no progress at all."""
+        bot = FakeBot()
+        reporter = ProgressReporter(bot, 1, min_interval=0, heartbeat=0.05)
+        reporter.start("download", "готовлю источник")
+        assert bot.messages[-1][1] == "⏳ Скачиваю · готовлю источник"
+        deadline = time.time() + 3
+        while not bot.edits and time.time() < deadline:
+            time.sleep(0.02)
+        reporter.finish("✅ Готово")
+        assert bot.edits, "heartbeat обязан был переписать сообщение"
+        assert "уже" in bot.edits[0][2] or bot.edits[-1][2] == "✅ Готово"
+
     def test_encode_text_names_the_clip(self):
         assert ProgressReporter.render("encode", 0.63, "клип 2/3") == "⏳ Кодирую · 63% · клип 2/3"
 
@@ -74,7 +87,8 @@ class TestProgress:
             clipper=clipper,
         )
         assert callable(seen["progress"])
-        assert any("Кодирую" in text for _, text in bot.messages)
+        texts = [text for _, text in bot.messages] + [text for _, _, text in bot.edits]
+        assert any("Кодирую" in text for text in texts), texts
         assert bot.edits and bot.edits[-1][2] == "✅ Готово, отправляю..."
 
     def test_error_is_reported_in_the_status_message(self, tmp_path):
