@@ -856,6 +856,28 @@ class TestPreview:
         assert PAGE.count('data-step="1"') == 2
 
 
+class TestPageVersion:
+    """После перезапуска сервиса открытая вкладка должна обновиться сама."""
+
+    def test_health_reports_the_page_fingerprint(self, server_factory, tmp_path):
+        import hashlib
+
+        from video_clipper.gui import PAGE
+
+        base = server_factory(fake_clipper(tmp_path / "c.mp4"))
+        status, body, _ = _get(base + "/api/health")
+        data = json.loads(body)
+        assert status == 200
+        assert data["version"] == hashlib.sha1(PAGE.encode("utf-8")).hexdigest()[:8]
+
+    def test_page_reloads_on_a_new_fingerprint(self):
+        from video_clipper.gui import PAGE
+
+        assert "sessionStorage.getItem('page_version')" in PAGE
+        assert "location.reload()" in PAGE
+        assert "setInterval(pingService, 60000)" in PAGE
+
+
 class TestMobileHeader:
     """На телефоне шапка не должна вылезать за экран."""
 

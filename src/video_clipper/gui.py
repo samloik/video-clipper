@@ -59,6 +59,11 @@ from .source import is_url
 log = logging.getLogger("video_clipper")
 STARTED_AT = time.time()
 
+
+def page_version() -> str:
+    """Короткий отпечаток страницы: по нему открытые вкладки замечают обновление."""
+    return hashlib.sha1(PAGE.encode("utf-8")).hexdigest()[:8]
+
 MAX_UPLOAD = 4 * 1024 * 1024 * 1024  # 4 GB
 # Эстимейт для GUI: локальный файл не надо качать, поэтому накладные меньше.
 ESTIMATE_LOCAL_OVERHEAD = 4.0
@@ -626,10 +631,30 @@ const drop = $('drop'), fileInput = $('file'), statusEl = $('status'),
       goBtn = $('go'), urlEl = $('url');
 let uploadedPath = null, startedAt = 0, tick = null, layout = 'crop';
 
-fetch('/api/health').then(r => r.json()).then(d => {
-  $('svc-text').textContent = d.status === 'ok' ? 'сервис работает' : 'нет связи';
-  if (d.status === 'ok') $('svc').classList.add('ok');
-}).catch(() => { $('svc-text').textContent = 'нет связи'; });
+function checkPageVersion(version) {
+  // После перезапуска сервиса в открытой вкладке остаётся старый JS.
+  // Замечаем новый отпечаток и перезагружаемся один раз, запомнив его.
+  if (!version) return false;
+  const seen = sessionStorage.getItem('page_version');
+  if (seen && seen !== version) {
+    sessionStorage.setItem('page_version', version);
+    location.reload();
+    return true;
+  }
+  sessionStorage.setItem('page_version', version);
+  return false;
+}
+
+function pingService() {
+  fetch('/api/health').then(r => r.json()).then(d => {
+    if (checkPageVersion(d.version)) return;
+    $('svc-text').textContent = d.status === 'ok' ? 'сервис работает' : 'нет связи';
+    if (d.status === 'ok') $('svc').classList.add('ok');
+  }).catch(() => { $('svc-text').textContent = 'нет связи'; });
+}
+
+pingService();
+setInterval(pingService, 60000);
 
 function setStatus(text, kind) {
   statusEl.className = 'status' + (kind ? ' ' + kind : '');
@@ -2305,7 +2330,13 @@ def make_handler(
             if path == "/api/health":
                 self._send(
                     200,
-                    _dumps({"status": "ok", "uptime_s": round(time.time() - STARTED_AT)}),
+                    _dumps(
+                        {
+                            "status": "ok",
+                            "uptime_s": round(time.time() - STARTED_AT),
+                            "version": page_version(),
+                        }
+                    ),
                 )
                 return
             if path == "/login":
