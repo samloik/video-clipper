@@ -213,7 +213,7 @@ class TestPageAndHealth:
         status, body = get(base, "/")
         assert status == 200
         text = body.decode("utf-8")
-        assert "Перетащи файл" in text
+        assert "Выбери файл или перетащи" in text
         assert "Нарезать" in text
 
     def test_health(self, server_factory, tmp_path):
