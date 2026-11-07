@@ -26,7 +26,7 @@ from typing import Any, Callable
 from urllib.parse import quote, unquote, urlparse
 
 from .config import Config, apply_retention_override, load_config
-from .cut import ClipResult
+from .cut import ClipResult, CutCancelled
 from .probe import EnvironmentProblem, check_tools
 from .segments import (
     Segment,
@@ -333,7 +333,11 @@ input::placeholder{color:#78818e}
 
 .out-head{display:flex;align-items:baseline;justify-content:space-between;gap:12px}
 .out-head .label{margin:0}
+.out-actions{display:flex;align-items:center;gap:10px}
 .timer{font-size:12.5px;color:var(--ink-3)}
+.ghost.stop{border-color:#5f2f28;color:var(--err)}
+.ghost.stop:hover{background:#1e1513;border-color:var(--err);color:var(--err)}
+.ghost.stop:disabled{opacity:.55;cursor:default}
 
 .status{color:var(--ink-3);font-size:13.5px;min-height:22px;display:flex;
   align-items:center;gap:9px;padding:0}
@@ -490,7 +494,10 @@ input::placeholder{color:#78818e}
   <section class="col-out">
     <div class="out-head">
       <span class="label">Результат</span>
-      <span class="timer mono" id="timer"></span>
+      <div class="out-actions">
+        <span class="timer mono" id="timer"></span>
+        <button class="ghost stop" id="stop" type="button" hidden>Стоп</button>
+      </div>
     </div>
     <div class="progress" id="progress" hidden><i id="bar"></i></div>
     <div class="status" id="status">Ждёт задание</div>
@@ -693,6 +700,26 @@ $('btn-clean').addEventListener('click', async () => {
     showPanel('Очистка', data.text || 'готово');
   } catch (err) {
     showPanel('Очистка', 'Ошибка: ' + err.message);
+  }
+});
+
+const stopBtn = $('stop');
+let currentJob = null;
+
+stopBtn.addEventListener('click', async () => {
+  if (!currentJob) return;
+  stopBtn.disabled = true;
+  setStatus('Останавливаю…', 'busy');
+  try {
+    const res = await fetch('/api/cancel/' + currentJob, { method: 'POST' });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      setStatus(data.error || 'не удалось остановить', 'err');
+    }
+  } catch (err) {
+    setStatus('нет связи: ' + err.message, 'err');
+  } finally {
+    setTimeout(() => { stopBtn.disabled = false; }, 1200);
   }
 });
 
@@ -924,8 +951,10 @@ goBtn.addEventListener('click', run);
 [urlEl, $('start'), $('end')].forEach(el => el.addEventListener('keydown', e => { if (e.key === 'Enter') run(); }));
 
 async function poll(id) {
+  currentJob = id;
   for (;;) {
     const job = await (await fetch('/api/jobs/' + id)).json();
+    stopBtn.hidden = job.state !== 'running';
     renderProgress(job);
     renderEta(job);
     if (job.state === 'running') {
@@ -934,7 +963,17 @@ async function poll(id) {
       const detail = job.detail ? ' · ' + job.detail : '';
       setStatus(stage + percent + detail, 'busy');
     }
+    if (job.state === 'cancelled') {
+      stopBtn.hidden = true;
+      renderProgress(job);
+      etaEl.textContent = '';
+      timerEl.textContent = '';
+      setStatus('Остановлено', 'err');
+      emptyEl.style.display = 'none';
+      return;
+    }
     if (job.state === 'error') {
+      stopBtn.hidden = true;
       renderProgress(job);
       renderEta(job);
       setStatus(job.error || 'ошибка', 'err');
@@ -1000,6 +1039,35 @@ JOBS: dict[str, dict[str, Any]] = {}
 _JOBS_LOCK = threading.Lock()
 
 
+class JobControl:
+    """Per-job cancellation: the stop flag plus the ffmpeg processes it started."""
+
+    def __init__(self) -> None:
+        self.event = threading.Event()
+        self._procs: list[Any] = []
+        self._lock = threading.Lock()
+
+    def is_set(self) -> bool:
+        return self.event.is_set()
+
+    def register(self, proc: Any) -> None:
+        with self._lock:
+            self._procs.append(proc)
+
+    def stop(self) -> None:
+        self.event.set()
+        with self._lock:
+            procs = list(self._procs)
+        for proc in procs:
+            try:
+                proc.kill()
+            except Exception:  # noqa: BLE001 — процесс мог уже завершиться
+                pass
+
+    def reset(self) -> None:
+        self.event.clear()
+
+
 def _new_job() -> str:
     job_id = uuid.uuid4().hex[:12]
     with _JOBS_LOCK:
@@ -1012,6 +1080,7 @@ def _new_job() -> str:
             "fraction": None,
             "detail": "",
             "files": [],
+            "control": JobControl(),
         }
     return job_id
 
@@ -1022,9 +1091,17 @@ def _job_update(job_id: str, **kwargs: Any) -> None:
 
 
 def _job_snapshot(job_id: str) -> dict[str, Any] | None:
+    """JSON-safe copy: the control object must never leave the process."""
     with _JOBS_LOCK:
         job = JOBS.get(job_id)
-        return dict(job) if job else None
+        return {key: value for key, value in job.items() if key != "control"} if job else None
+
+
+def _job_control(job_id: str) -> "JobControl | None":
+    with _JOBS_LOCK:
+        job = JOBS.get(job_id)
+        control = job.get("control") if job else None
+        return control if isinstance(control, JobControl) else None
 
 
 def _estimate(
@@ -1061,6 +1138,7 @@ def _run_job(
     vertical: bool = False,
     layout: str = "crop",
 ) -> None:
+    control = _job_control(job_id)
     try:
         from .source import resolve_open_ends_for_source
 
@@ -1095,13 +1173,30 @@ def _run_job(
             )
         try:
             results = clipper(
-                source, segments, fast, cfg, progress, vertical=vertical, layout=layout
+                source,
+                segments,
+                fast,
+                cfg,
+                progress,
+                vertical=vertical,
+                layout=layout,
+                control=control,
             )
-        except TypeError:  # a custom clipper without the vertical/layout parameters (tests)
+        except TypeError:  # a custom clipper without these keyword arguments (tests)
             try:
-                results = clipper(source, segments, fast, cfg, progress, vertical=vertical)
+                results = clipper(
+                    source, segments, fast, cfg, progress, vertical=vertical, layout=layout
+                )
             except TypeError:
-                results = clipper(source, segments, fast, cfg, progress)
+                try:
+                    results = clipper(source, segments, fast, cfg, progress, vertical=vertical)
+                except TypeError:
+                    results = clipper(source, segments, fast, cfg, progress)
+        if control is not None and control.is_set():
+            _job_update(
+                job_id, state="cancelled", error="Остановлено", error_details="", message=""
+            )
+            return
         payload = []
         files = []
         for res in results:
@@ -1116,6 +1211,16 @@ def _run_job(
             files.append(str(res.output_path))
         _job_update(job_id, state="done", results=payload, files=files, message="")
     except Exception as exc:  # noqa: BLE001 - reported to the page
+        if (control is not None and control.is_set()) or isinstance(exc, CutCancelled):
+            log.info("Задание %s остановлено пользователем", job_id)
+            _job_update(
+                job_id,
+                state="cancelled",
+                error="Остановлено",
+                error_details="",
+                message="",
+            )
+            return
         log.exception("Ошибка задания %s", job_id)
         reason = str(exc) or exc.__class__.__name__
         _job_update(
@@ -1137,6 +1242,7 @@ def default_clipper(
     progress=None,
     vertical: bool = False,
     layout: str = "crop",
+    control: "JobControl | None" = None,
 ) -> list[ClipResult]:
     """Download (if needed), validate and cut — the same path the CLI uses."""
     from .cut import cut_segment, pick_vertical_size, vertical_name
@@ -1154,6 +1260,7 @@ def default_clipper(
         source,
         cfg,
         segments=[(s.start, s.end) for s in segments],
+        cancel_event=control,
         progress=report,
     )
     try:
@@ -1189,6 +1296,8 @@ def default_clipper(
                     src.info.height, cfg.vertical_width, cfg.vertical_height
                 ),
                 progress=clip_progress,
+                cancel=control,
+                on_process=control.register if control is not None else None,
             )
             result.segment = shown
             results.append(result)
@@ -1242,6 +1351,8 @@ GUI_HELP = """Как пользоваться
   2. Задай начало и конец отрезка. Кнопки 15 с / 30 с / 1 мин / 3 мин ставят длительность
      от начала, «сброс» возвращает конец к началу ролика.
   3. Нажми «Нарезать» — справа появится клип, его можно скачать.
+     Пока идёт работа рядом с таймером есть кнопка «Стоп»: она обрывает загрузку и
+     кодирование сразу, недописанный файл удаляется.
 
 Несколько отрезков
   Заполни начало и конец, нажми «+ в список» — отрезок уйдёт в список, поля очистятся.
@@ -1537,6 +1648,22 @@ def make_handler(
                 self._error(413, "файл слишком большой")
                 return
             body = self.rfile.read(length) if length else b""
+
+            if parsed.path.startswith("/api/cancel/"):
+                job_id = parsed.path.rsplit("/", 1)[-1]
+                job = _job_snapshot(job_id)
+                if job is None:
+                    self._error(404, "задание не найдено")
+                    return
+                if job.get("state") != "running":
+                    self._error(409, "задание уже завершено")
+                    return
+                control = _job_control(job_id)
+                if control is not None:
+                    control.stop()
+                log.info("GUI: останавливаю задание %s", job_id)
+                self._send(200, _dumps({"state": "cancelling"}))
+                return
 
             if parsed.path == "/api/retention":
                 from .timecode import format_retention, parse_retention

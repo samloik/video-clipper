@@ -11,7 +11,7 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 from .segments import Segment
 
@@ -321,11 +321,17 @@ def shrink_to_fit(
     return last
 
 
+class CutCancelled(Exception):
+    """Остановлено пользователем (кнопка «Стоп» в GUI)."""
+
+
 def _run_with_progress(
     cmd: list[str],
     seg: Segment,
     progress: Callable[[str, float | None, str], None],
     timeout: float | None,
+    cancel: Any = None,
+    on_process: Callable[[Any], None] | None = None,
 ) -> tuple[int, str]:
     """Run ffmpeg and report progress from its ``-progress pipe:1`` stream.
 
@@ -335,10 +341,18 @@ def _run_with_progress(
     full = [cmd[0], "-nostats", "-progress", "pipe:1", *cmd[1:]]
     deadline = time.monotonic() + timeout if timeout else None
     with tempfile.TemporaryFile(mode="w+") as err:
+        if cancel is not None and cancel.is_set():
+            raise CutCancelled(f"остановлено до начала кодирования {seg.label}")
         proc = subprocess.Popen(full, stdout=subprocess.PIPE, stderr=err, text=True)
+        if on_process is not None:
+            on_process(proc)
         assert proc.stdout is not None
         try:
             for line in proc.stdout:
+                if cancel is not None and cancel.is_set():
+                    proc.kill()
+                    proc.wait()
+                    raise CutCancelled(f"остановлено на {seg.label}")
                 line = line.strip()
                 if line.startswith("out_time_us="):
                     raw = line.split("=", 1)[1]
@@ -376,6 +390,8 @@ def cut_segment(
     vertical_size: tuple[int, int] = VERTICAL_SIZE,
     timeout: float | None = None,
     progress: Callable[[str, float | None, str], None] | None = None,
+    cancel: Any = None,
+    on_process: Callable[[Any], None] | None = None,
 ) -> ClipResult:
     """Run ffmpeg for one segment and return the result."""
     out_path = Path(out)
@@ -397,7 +413,15 @@ def cut_segment(
     log.info("Нарезка %s: %s → %s", mode, seg.label, out_path.name)
     log.debug("ffmpeg: %s", " ".join(cmd))
 
+    def _cleanup_partial() -> None:
+        try:
+            out_path.unlink(missing_ok=True)
+        except OSError:  # pragma: no cover - best effort
+            pass
+
     if progress is None:
+        if cancel is not None and cancel.is_set():
+            raise CutCancelled(f"остановлено до начала кодирования {seg.label}")
         try:
             proc = runner(cmd, capture_output=True, text=True, check=False, timeout=timeout)
         except subprocess.TimeoutExpired as exc:
@@ -407,7 +431,13 @@ def cut_segment(
             ) from exc
         returncode, stderr = proc.returncode, proc.stderr or ""
     else:
-        returncode, stderr = _run_with_progress(cmd, seg, progress, timeout)
+        try:
+            returncode, stderr = _run_with_progress(
+                cmd, seg, progress, timeout, cancel=cancel, on_process=on_process
+            )
+        except CutCancelled:
+            _cleanup_partial()
+            raise
     if returncode != 0:
         tail = stderr.strip().splitlines()[-5:]
         raise CutError(

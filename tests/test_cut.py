@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import subprocess
+import threading
 from pathlib import Path
 
 import pytest
 
 from video_clipper.cut import (
+    CutCancelled,
     CutError,
     build_ffmpeg_command,
     cut_segment,
@@ -297,3 +299,45 @@ class TestCutSegment:
         f.write_bytes(b"x")
         remove_source(f)
         assert not f.exists() and not f.parent.exists()
+
+
+class TestCancel:
+    def test_cancel_before_the_encoder_starts(self, ten_seconds, tmp_path):
+        stop = threading.Event()
+        stop.set()
+        out = tmp_path / "never.mp4"
+        with pytest.raises(CutCancelled):
+            cut_segment(
+                ten_seconds, out, Segment(0, 5), progress=lambda *a: None, cancel=stop
+            )
+        assert not out.exists()
+
+    def test_cancel_midway_removes_the_partial_file(self, ten_seconds, tmp_path):
+        stop = threading.Event()
+        out = tmp_path / "half.mp4"
+
+        def progress(stage, fraction, detail):
+            if fraction is not None and fraction >= 0.05:
+                stop.set()
+
+        with pytest.raises(CutCancelled):
+            cut_segment(ten_seconds, out, Segment(0, 10), progress=progress, cancel=stop)
+        assert not out.exists(), "недописанный файл не должен оставаться"
+
+    def test_job_control_kills_the_process_it_started(self):
+        from video_clipper.gui import JobControl
+
+        class FakeProc:
+            def __init__(self):
+                self.killed = False
+
+            def kill(self):
+                self.killed = True
+
+        proc = FakeProc()
+        control = JobControl()
+        control.register(proc)
+        assert control.is_set() is False
+        control.stop()
+        assert control.is_set() is True
+        assert proc.killed is True

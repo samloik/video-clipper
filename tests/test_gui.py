@@ -443,6 +443,64 @@ class TestErrorDetails:
         assert "showPanel('Ошибка'" in PAGE
 
 
+class TestCancel:
+    def _slow_clipper(self):
+        def clipper(source, segments, fast, cfg, progress=None, vertical=False,
+                    layout="crop", control=None):
+            for _ in range(200):
+                if control is not None and control.is_set():
+                    return []
+                time.sleep(0.05)
+            return []
+
+        return clipper
+
+    def test_cancel_stops_a_running_job(self, server_factory, tmp_path):
+        base = server_factory(self._slow_clipper())
+        media = tmp_path / "v.mp4"
+        media.write_bytes(b"x")
+        _, body = post_json(base, "/api/clip", {
+            "source": str(media), "segments": [{"start": "0:00", "end": "0:05"}],
+        })
+        job_id = body["job_id"]
+        time.sleep(0.15)
+        status, payload, _ = _get(base + f"/api/cancel/{job_id}", method="POST")
+        assert status == 200
+        for _ in range(60):
+            job = json.loads(get(base, f"/api/jobs/{job_id}")[1])
+            if job["state"] != "running":
+                break
+            time.sleep(0.05)
+        assert job["state"] == "cancelled"
+        assert job["error"] == "Остановлено"
+
+    def test_cancel_unknown_job_is_404(self, server_factory, tmp_path):
+        base = server_factory(fake_clipper(tmp_path / "c.mp4"))
+        status, _, _ = _get(base + "/api/cancel/nope", method="POST")
+        assert status == 404
+
+    def test_cancel_finished_job_is_409(self, server_factory, tmp_path):
+        base = server_factory(fake_clipper(tmp_path / "c.mp4"))
+        media = tmp_path / "v.mp4"
+        media.write_bytes(b"x")
+        _, body = post_json(base, "/api/clip", {
+            "source": str(media), "segments": [{"start": "0:00", "end": "0:01"}],
+        })
+        for _ in range(60):
+            job = json.loads(get(base, f"/api/jobs/{body['job_id']}")[1])
+            if job["state"] != "running":
+                break
+            time.sleep(0.05)
+        status, _, _ = _get(base + f"/api/cancel/{body['job_id']}", method="POST")
+        assert status == 409
+
+    def test_page_has_the_stop_button(self):
+        from video_clipper.gui import PAGE
+
+        assert 'id="stop"' in PAGE and "/api/cancel/" in PAGE
+        assert "Остановлено" in PAGE
+
+
 class TestBatch:
     def _clipper(self, tmp_path):
         """Возвращает по клипу на каждый отрезок — как настоящий нарезчик."""
