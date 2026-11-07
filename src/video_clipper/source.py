@@ -69,7 +69,10 @@ META_TTL = 300.0
 
 
 def _base_opts(
-    cfg: Config, height: int | None = None, cancel_event: Any = None
+    cfg: Config,
+    height: int | None = None,
+    cancel_event: Any = None,
+    progress: Callable[[str, float | None, str], None] | None = None,
 ) -> dict[str, Any]:
     height = height or cfg.default_resolution
     opts: dict[str, Any] = {
@@ -89,13 +92,31 @@ def _base_opts(
         cookies = Path(cfg.cookies).expanduser()
         if cookies.is_file():
             opts["cookiefile"] = str(cookies)
+    hooks = []
     if cancel_event is not None:
         # yt-dlp calls the hook while downloading: raising aborts the transfer.
-        def _hook(_progress: dict[str, Any]) -> None:
+        def _cancel_hook(_progress: dict[str, Any]) -> None:
             if cancel_event.is_set():
                 raise RuntimeError("остановлено пользователем")
 
-        opts["progress_hooks"] = [_hook]
+        hooks.append(_cancel_hook)
+    if progress is not None:
+        def _progress_hook(status: dict[str, Any]) -> None:
+            state = status.get("status")
+            if state == "downloading":
+                done = float(status.get("downloaded_bytes") or 0)
+                total = float(status.get("total_bytes") or status.get("total_bytes_estimate") or 0)
+                fraction = done / total if total else None
+                detail = f"{done / 1048576:.1f} МБ"
+                if total:
+                    detail += f" из {total / 1048576:.1f} МБ"
+                progress("download", fraction, detail)
+            elif state == "finished":
+                progress("download", 1.0, "")
+
+        hooks.append(_progress_hook)
+    if hooks:
+        opts["progress_hooks"] = hooks
     return opts
 
 
@@ -133,6 +154,7 @@ def prepare_source(
     keep_source: bool = False,
     downloader: Callable[[str, dict[str, Any]], dict[str, Any]] | None = None,
     cancel_event: Any = None,
+    progress: Callable[[str, float | None, str], None] | None = None,
 ) -> Source:
     """Return a usable local file for ``source``.
 
@@ -160,7 +182,7 @@ def prepare_source(
             url=source,
         )
 
-    return _download(source, cfg, segments or [], keep_source, downloader, cancel_event)
+    return _download(source, cfg, segments or [], keep_source, downloader, cancel_event, progress)
 
 
 SECTION_COVERAGE = 0.4
@@ -187,6 +209,7 @@ def _download(
     keep_source: bool,
     downloader: Callable[[str, dict[str, Any]], dict[str, Any]] | None,
     cancel_event: Any = None,
+    progress: Callable[[str, float | None, str], None] | None = None,
 ) -> Source:
     try:
         import yt_dlp  # noqa: F401  # imported lazily so CLI --help works without the dependency
@@ -202,7 +225,7 @@ def _download(
     sections_dir = cache_dir / "sections"
     outtmpl = str(cache_dir / "%(title).80s-%(id)s.%(ext)s")
 
-    opts: dict[str, Any] = _base_opts(cfg, height, cancel_event)
+    opts: dict[str, Any] = _base_opts(cfg, height, cancel_event, progress)
     opts["outtmpl"] = outtmpl
     if cfg.cookies and not Path(cfg.cookies).expanduser().is_file():
         log.warning("Файл cookies не найден, продолжаю без него: %s", cfg.cookies)

@@ -5,8 +5,11 @@ from __future__ import annotations
 import logging
 import shutil
 import subprocess
+import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 from .segments import Segment
 
@@ -219,6 +222,48 @@ def shrink_to_fit(
     return last
 
 
+def _run_with_progress(
+    cmd: list[str],
+    seg: Segment,
+    progress: Callable[[str, float | None, str], None],
+    timeout: float | None,
+) -> tuple[int, str]:
+    """Run ffmpeg and report progress from its ``-progress pipe:1`` stream.
+
+    stderr goes to a temporary file: ffmpeg logs enough to fill a pipe buffer and
+    block the process if nobody reads it.
+    """
+    full = [cmd[0], "-nostats", "-progress", "pipe:1", *cmd[1:]]
+    deadline = time.monotonic() + timeout if timeout else None
+    with tempfile.TemporaryFile(mode="w+") as err:
+        proc = subprocess.Popen(full, stdout=subprocess.PIPE, stderr=err, text=True)
+        assert proc.stdout is not None
+        try:
+            for line in proc.stdout:
+                line = line.strip()
+                if line.startswith("out_time_us="):
+                    raw = line.split("=", 1)[1]
+                    if raw.isdigit():
+                        seconds = int(raw) / 1_000_000
+                        progress(
+                            "encode",
+                            min(1.0, seconds / max(seg.duration, 0.001)),
+                            seg.label,
+                        )
+                if deadline and time.monotonic() > deadline:
+                    proc.kill()
+                    proc.wait()
+                    raise CutError(
+                        f"ffmpeg не успел обработать {seg.label} за {timeout} с — отрезок слишком "
+                        f"длинный для этого режима, попробуй покороче или --fast"
+                    )
+        finally:
+            proc.stdout.close()
+        proc.wait()
+        err.seek(0)
+        return proc.returncode, err.read()
+
+
 def cut_segment(
     src: str | Path,
     out: str | Path,
@@ -231,6 +276,7 @@ def cut_segment(
     layout: str = "crop",
     vertical_size: tuple[int, int] = VERTICAL_SIZE,
     timeout: float | None = None,
+    progress: Callable[[str, float | None, str], None] | None = None,
 ) -> ClipResult:
     """Run ffmpeg for one segment and return the result."""
     out_path = Path(out)
@@ -252,17 +298,21 @@ def cut_segment(
     log.info("Нарезка %s: %s → %s", mode, seg.label, out_path.name)
     log.debug("ffmpeg: %s", " ".join(cmd))
 
-    try:
-        proc = runner(cmd, capture_output=True, text=True, check=False, timeout=timeout)
-    except subprocess.TimeoutExpired as exc:
+    if progress is None:
+        try:
+            proc = runner(cmd, capture_output=True, text=True, check=False, timeout=timeout)
+        except subprocess.TimeoutExpired as exc:
+            raise CutError(
+                f"ffmpeg не успел обработать {seg.label} за {timeout} с — отрезок слишком длинный "
+                f"для этого режима, попробуй покороче или --fast"
+            ) from exc
+        returncode, stderr = proc.returncode, proc.stderr or ""
+    else:
+        returncode, stderr = _run_with_progress(cmd, seg, progress, timeout)
+    if returncode != 0:
+        tail = stderr.strip().splitlines()[-5:]
         raise CutError(
-            f"ffmpeg не успел обработать {seg.label} за {timeout} с — отрезок слишком длинный "
-            f"для этого режима, попробуй покороче или --fast"
-        ) from exc
-    if proc.returncode != 0:
-        tail = (proc.stderr or "").strip().splitlines()[-5:]
-        raise CutError(
-            f"ffmpeg завершился с кодом {proc.returncode} для {seg.label}: " + " | ".join(tail)
+            f"ffmpeg завершился с кодом {returncode} для {seg.label}: " + " | ".join(tail)
         )
     if not out_path.is_file() or out_path.stat().st_size == 0:
         raise CutError(f"ffmpeg не создал файл {out_path}")

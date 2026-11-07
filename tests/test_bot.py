@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from video_clipper.bot import (
+    ProgressReporter,
     clip_caption,
     describe_request,
     estimate_seconds,
@@ -31,6 +32,64 @@ def no_metadata_network(monkeypatch):
     monkeypatch.setattr("video_clipper.bot.fetch_metadata", lambda *args, **kwargs: {})
     yield
     source_module._META_CACHE.clear()
+
+
+class TestProgress:
+    def test_first_update_sends_a_message(self):
+        bot = FakeBot()
+        reporter = ProgressReporter(bot, 1, min_interval=0)
+        reporter.update("download", 0.42, "18.4 МБ из 44.0 МБ")
+        assert bot.messages[-1][1] == "⏳ Скачиваю · 42% · 18.4 МБ из 44.0 МБ"
+        assert bot.edits == []
+
+    def test_updates_are_throttled_but_finish_always_lands(self):
+        bot = FakeBot()
+        reporter = ProgressReporter(bot, 1, min_interval=60)
+        reporter.update("download", 0.1, "")
+        reporter.update("download", 0.5, "")
+        assert bot.edits == [], "внутри интервала править нельзя"
+        reporter.finish("✅ Готово")
+        assert bot.edits[-1][2] == "✅ Готово"
+
+    def test_encode_text_names_the_clip(self):
+        assert ProgressReporter.render("encode", 0.63, "клип 2/3") == "⏳ Кодирую · 63% · клип 2/3"
+
+    def test_fraction_may_be_unknown(self):
+        assert ProgressReporter.render("download", None, "7.2 МБ") == "⏳ Скачиваю · 7.2 МБ"
+
+    def test_bot_passes_progress_to_the_clipper_and_reports_done(self, tmp_path):
+        seen = {}
+
+        def clipper(source, segments, fast, cfg, progress=None):
+            seen["progress"] = progress
+            progress("encode", 0.5, "клип 1/1")
+            progress("encode", 1.0, "клип 1/1")
+            return []
+
+        bot = FakeBot()
+        handle_message(
+            bot,
+            _cfg(tmp_path),
+            {"chat": {"id": 1}, "text": "https://youtu.be/x 0:00-0:12"},
+            clipper=clipper,
+        )
+        assert callable(seen["progress"])
+        assert any("Кодирую" in text for _, text in bot.messages)
+        assert bot.edits and bot.edits[-1][2] == "✅ Готово, отправляю..."
+
+    def test_error_is_reported_in_the_status_message(self, tmp_path):
+        def clipper(source, segments, fast, cfg, progress=None):
+            progress("download", 0.1, "")
+            raise RuntimeError("сеть отвалилась")
+
+        bot = FakeBot()
+        handle_message(
+            bot,
+            _cfg(tmp_path),
+            {"chat": {"id": 1}, "text": "https://youtu.be/x 0:00-0:12"},
+            clipper=clipper,
+        )
+        assert bot.edits and bot.edits[-1][2] == "⚠️ Ошибка"
 
 
 class TestPreDownloadCheck:
@@ -244,9 +303,14 @@ class FakeBot:
         self.actions: list[str] = []
         self.markups: list[dict | None] = []
         self.answered: list[str] = []
+        self.edits: list[tuple[int, int, str]] = []
 
     def send_message(self, chat_id, text):
         self.messages.append((chat_id, text))
+        return {"message_id": len(self.messages)}
+
+    def edit_message_text(self, chat_id, message_id, text):
+        self.edits.append((chat_id, message_id, text))
 
     def send_video(self, chat_id, path, caption="", reply_markup=None):
         self.videos.append((chat_id, Path(path), caption))
@@ -293,7 +357,7 @@ def make_clipper(tmp_path: Path):
 
 
 def fake_clip_for_bot(tmp_path):
-    def _inner(source, segments, fast, cfg, vertical=False, layout="crop"):
+    def _inner(source, segments, fast, cfg, vertical=False, layout="crop", progress=None):
         out = tmp_path / "out" / "clip.mp4"
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_bytes(b"mp4")
@@ -353,7 +417,7 @@ class TestFastButton:
 
         seen = {}
 
-        def fake(source, segments, fast, cfg, vertical=False, layout="crop"):
+        def fake(source, segments, fast, cfg, vertical=False, layout="crop", progress=None):
             seen["vertical"] = vertical
             return fake_clip_for_bot(tmp_path)(source, segments, fast, cfg)[0], {
                 "path": str(tmp_path / "out" / "clip.mp4"),
@@ -459,7 +523,7 @@ class TestWholeVideo:
 
         seen = {}
 
-        def fake(source, segments, fast, cfg, vertical=False, layout="crop"):
+        def fake(source, segments, fast, cfg, vertical=False, layout="crop", progress=None):
             seen["segments"] = list(segments)
             out = tmp_path / "out" / "whole.mp4"
             out.parent.mkdir(parents=True, exist_ok=True)

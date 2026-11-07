@@ -177,6 +177,33 @@ class TestWholeAndShrink:
         assert result.stat().st_size == 50
 
 
+class TestCutProgress:
+    def test_ffmpeg_reports_growing_fractions(self, ten_seconds, tmp_path):
+        seen: list[tuple[str, float | None, str]] = []
+        result = cut_segment(
+            ten_seconds,
+            tmp_path / "out.mp4",
+            Segment(1.0, 6.0),
+            progress=lambda stage, fraction, detail: seen.append((stage, fraction, detail)),
+        )
+        assert result.duration > 4.5
+        stages = {stage for stage, _, _ in seen}
+        assert stages == {"encode"}
+        fractions = [f for _, f, _ in seen if f is not None]
+        assert fractions, "ffmpeg должен был сообщить прогресс"
+        assert fractions == sorted(fractions), "прогресс обязан расти"
+        assert fractions[-1] > 0.9
+
+    def test_missing_ffmpeg_still_fails_cleanly(self, tmp_path):
+        with pytest.raises(CutError):
+            cut_segment(
+                tmp_path / "нет.mp4",
+                tmp_path / "out.mp4",
+                Segment(0.0, 1.0),
+                progress=lambda *a: None,
+            )
+
+
 class TestCutSegment:
     def test_accurate_duration(self, ten_seconds, tmp_path):
         out = tmp_path / "accurate.mp4"

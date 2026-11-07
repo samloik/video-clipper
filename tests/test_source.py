@@ -208,6 +208,31 @@ class TestDownload:
             prepare_source("https://youtu.be/x", cfg, segments=[(0, 20)], downloader=downloader)
         assert len(attempts) == 2  # metadata + the failed section attempt, no third try
 
+    def test_download_reports_progress(self, sample_video, tmp_path):
+        events: list[tuple[str, float | None, str]] = []
+
+        def downloader(url, opts):
+            if opts.get("skip_download"):
+                return {"duration": 60.0, "title": "ролик"}
+            for hook in opts.get("progress_hooks", []):
+                hook({"status": "downloading", "downloaded_bytes": 5_000_000,
+                      "total_bytes": 10_000_000})
+                hook({"status": "finished"})
+            return {"requested_downloads": [{"filepath": str(sample_video)}]}
+
+        cfg = load_config(None).with_overrides(cache_dir=tmp_path / "cache")
+        prepare_source(
+            "https://youtu.be/x",
+            cfg,
+            segments=[(0, 10)],
+            downloader=downloader,
+            progress=lambda stage, fraction, detail: events.append((stage, fraction, detail)),
+        )
+        assert events[0][0] == "download"
+        assert events[0][1] == 0.5
+        assert "МБ" in events[0][2]
+        assert events[-1][1] == 1.0
+
     def test_range_past_the_end_never_starts_a_download(self, tmp_path):
         calls = []
 

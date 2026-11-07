@@ -33,6 +33,7 @@ import urllib.request
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 
 from .config import Config, load_config
 from .segments import Segment, parse_range_spec
@@ -202,6 +203,22 @@ class Telegram:
     def send_message(self, chat_id: int, text: str) -> dict:
         return self.call("sendMessage", {"chat_id": chat_id, "text": text, "disable_web_page_preview": True})
 
+    def edit_message_text(self, chat_id: int, message_id: int, text: str) -> None:
+        """Rewrite the status message; cosmetic failures must not break the job."""
+        try:
+            self.call(
+                "editMessageText",
+                {
+                    "chat_id": chat_id,
+                    "message_id": message_id,
+                    "text": text,
+                    "disable_web_page_preview": True,
+                },
+                timeout=20,
+            )
+        except TelegramError:
+            pass
+
     def send_chat_action(self, chat_id: int, action: str = "upload_video") -> None:
         try:
             self.call("sendChatAction", {"chat_id": chat_id, "action": action}, timeout=15)
@@ -338,6 +355,7 @@ def clip_for_bot(
     cfg: Config,
     vertical: bool = False,
     layout: str = "crop",
+    progress: "Callable[[str, float | None, str], None] | None" = None,
 ) -> tuple[list, dict]:
     """Cut for the bot and keep the source file so a re-cut is instant.
 
@@ -354,6 +372,7 @@ def clip_for_bot(
         segments=[(s.start, s.end) for s in segments],
         keep_source=True,
         cancel_event=STOP_REQUESTED,
+        progress=progress,
     )
     whole = not segments
     if whole:
@@ -392,10 +411,18 @@ def clip_for_bot(
         }
 
     results = []
+    total = len(shifted)
     for i, seg in enumerate(shifted):
         if STOP_REQUESTED.is_set():
             raise JobCancelled("остановлено пользователем")
         shown = segments[i] if i < len(segments) else seg
+
+        def clip_progress(
+            stage: str, fraction: float | None, detail: str, _i: int = i, _total: int = total
+        ) -> None:
+            if progress is not None:
+                progress(stage, fraction, f"клип {_i + 1}/{_total}")
+
         result = cut_segment(
             str(src.path),
             out_dir / vertical_name(clip_filename(src.title, source, shown), vertical, layout),
@@ -409,6 +436,7 @@ def clip_for_bot(
                 src.info.height, cfg.vertical_width, cfg.vertical_height
             ),
             timeout=FFMPEG_TIMEOUT,
+            progress=clip_progress,
         )
         result.segment = shown
         results.append(result)
@@ -543,6 +571,55 @@ def describe_request(
         )
     lines.append("Режу...")
     return "\n".join(lines)
+
+
+class ProgressReporter:
+    """One chat message that is edited as the job advances.
+
+    Telegram rate-limits edits, and a hook fires many times per second, so the
+    text is rewritten at most once per ``min_interval`` seconds.
+    """
+
+    def __init__(self, bot, chat_id: int, min_interval: float = 8.0):
+        self.bot = bot
+        self.chat_id = chat_id
+        self.min_interval = min_interval
+        self.message_id: int | None = None
+        self._last_at = 0.0
+        self._last_text = ""
+
+    @staticmethod
+    def render(stage: str, fraction: float | None, detail: str) -> str:
+        head = {"download": "Скачиваю", "encode": "Кодирую"}.get(stage, stage)
+        parts = [head]
+        if fraction is not None:
+            parts.append(f"{fraction * 100:.0f}%")
+        if detail:
+            parts.append(detail)
+        return "⏳ " + " · ".join(parts)
+
+    def update(self, stage: str, fraction: float | None = None, detail: str = "") -> None:
+        text = self.render(stage, fraction, detail)
+        now = time.monotonic()
+        if self.message_id is None:
+            try:
+                result = self.bot.send_message(self.chat_id, text)
+                self.message_id = result.get("message_id") if isinstance(result, dict) else None
+            except TelegramError:
+                return
+            self._last_at, self._last_text = now, text
+            return
+        done = fraction is not None and fraction >= 0.999
+        if text == self._last_text or (not done and now - self._last_at < self.min_interval):
+            return
+        self._last_at, self._last_text = now, text
+        self.bot.edit_message_text(self.chat_id, self.message_id, text)
+
+    def finish(self, text: str = "✅ Готово") -> None:
+        if self.message_id is None or text == self._last_text:
+            return
+        self._last_text = text
+        self.bot.edit_message_text(self.chat_id, self.message_id, text)
 
 
 def segments_from_text(body: str) -> list[Segment]:
@@ -738,11 +815,14 @@ def handle_message(bot, cfg: Config, message: dict, clipper=None) -> None:
     STOP_REQUESTED.clear()
     bot.send_message(chat_id, describe_request(request, duration=duration, title=title))
     bot.send_chat_action(chat_id, "record_video")
+    reporter = ProgressReporter(bot, chat_id)
 
     job: dict | None = None
     try:
         if clipper is not None:
-            results = clipper(request.source, request.segments, request.fast, cfg, progress=None)
+            results = clipper(
+                request.source, request.segments, request.fast, cfg, progress=reporter.update
+            )
         else:
             results, job = clip_for_bot(
                 request.source,
@@ -751,17 +831,22 @@ def handle_message(bot, cfg: Config, message: dict, clipper=None) -> None:
                 cfg,
                 vertical=request.vertical,
                 layout=request.layout,
+                progress=reporter.update,
             )
     except JobCancelled:
+        reporter.finish("⛔️ Остановлено")
         bot.send_message(chat_id, "Остановлено. Повторить — /resume.")
         return
     except Exception as exc:  # noqa: BLE001 — the chat is the error channel
         if STOP_REQUESTED.is_set():
+            reporter.finish("⛔️ Остановлено")
             bot.send_message(chat_id, "Остановлено. Повторить — /resume.")
             return
         log.exception("Ошибка нарезки")
+        reporter.finish("⚠️ Ошибка")
         bot.send_message(chat_id, f"Ошибка: {exc}")
         return
+    reporter.finish("✅ Готово, отправляю...")
 
     job_key = ""
     if job is not None:
