@@ -608,10 +608,22 @@ def run_gui(config_path: str | None = None, open_browser: bool = True,
         print(f"Ошибка окружения: {exc}")
         return 2
 
-    httpd = create_server(cfg, host=host, port=port)
+    try:
+        httpd = create_server(cfg, host=host, port=port)
+    except OSError as exc:
+        hint = "порт занят другим процессом" if exc.errno == 98 else str(exc)
+        print(
+            f"Не удалось занять {cfg.gui_host}:{cfg.gui_port if port is None else port} — {hint}. "
+            f"Поменяй gui_port в конфиге или останови занявший его процесс."
+        )
+        return 2
+    except RuntimeError as exc:
+        print(f"Ошибка запуска GUI: {exc}")
+        return 2
     host, port = httpd.server_address[0], httpd.server_address[1]
     url = f"http://{host}:{port}/"
-    print(f"GUI: {url}  (Ctrl+C для остановки)")
+    gate = "вход по паролю" if read_gui_password(cfg) else "без пароля (только localhost)"
+    print(f"GUI: {url}  ({gate}; Ctrl+C для остановки)")
     if open_browser:
         threading.Timer(0.7, lambda: webbrowser.open(url)).start()
     try:
