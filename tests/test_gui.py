@@ -229,6 +229,16 @@ class TestPageAndHealth:
             httpd.server_close()
 
 
+class TestServicePanel:
+    def test_panel_lives_in_the_result_column(self):
+        from video_clipper.gui import PAGE
+
+        assert PAGE.index('class="col-out"') < PAGE.index('id="panel"')
+        assert 'panel-title' in PAGE, "у панели должен быть заголовок"
+        # панель не должна висеть под шапкой на всю ширину
+        assert '</header>\n\n<div class="panel"' not in PAGE
+
+
 class TestServiceEndpoints:
     def test_status_reports_files(self, server_factory, cfg, tmp_path):
         (cfg.cache_dir).mkdir(parents=True, exist_ok=True)

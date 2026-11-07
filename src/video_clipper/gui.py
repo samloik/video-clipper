@@ -154,10 +154,12 @@ body{background:var(--bg);color:var(--ink);font:15px/1.5 var(--sans);
   border-radius:8px;padding:7px 11px;font-size:12.5px;cursor:pointer;min-height:34px}
 .ghost:hover{border-color:var(--line-2);color:var(--ink)}
 .ghost:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
-.panel{border-bottom:1px solid var(--line);background:var(--panel);padding:14px 22px;
-  display:flex;gap:16px;align-items:flex-start}
-.panel pre{margin:0;flex:1;white-space:pre-wrap;font:12.5px/1.6 var(--mono);
-  color:var(--ink-2);max-height:38vh;overflow:auto}
+.panel{display:flex;flex-direction:column;gap:12px;flex:1;min-height:0;
+  border:1px solid var(--line);border-radius:var(--r);background:var(--panel);
+  padding:14px 16px}
+.panel-head{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.panel pre{margin:0;flex:1;min-height:0;overflow:auto;white-space:pre-wrap;
+  font:12.5px/1.65 var(--mono);color:var(--ink-2)}
 .progress{height:4px;border-radius:999px;background:var(--line);overflow:hidden}
 .progress[hidden]{display:none}
 .progress i{display:block;height:100%;width:0;background:var(--accent);
@@ -319,11 +321,6 @@ input::placeholder{color:#78818e}
   </div>
 </header>
 
-<div class="panel" id="panel" hidden>
-  <pre id="panel-text"></pre>
-  <button class="ghost" id="panel-close" type="button">закрыть</button>
-</div>
-
 <main class="grid">
   <section class="col-form">
     <div>
@@ -389,6 +386,13 @@ input::placeholder{color:#78818e}
         <li><i>3</i><span>клип можно скачать сразу</span></li>
       </ul>
     </div>
+    <div class="panel" id="panel" hidden>
+      <div class="panel-head">
+        <span class="label" id="panel-title">Статус</span>
+        <button class="ghost" id="panel-close" type="button">закрыть</button>
+      </div>
+      <pre id="panel-text"></pre>
+    </div>
   </section>
 </main>
 
@@ -417,40 +421,43 @@ function setStatus(text, kind) {
 
 const panelEl = $('panel'), panelText = $('panel-text');
 const progressEl = $('progress'), barEl = $('bar');
-let panelTimer = null;
 
-function showPanel(text) {
+function showPanel(title, text) {
+  $('panel-title').textContent = title;
   panelText.textContent = text;
   panelEl.hidden = false;
-  clearTimeout(panelTimer);
+  emptyEl.style.display = 'none';
 }
-function hidePanel() { panelEl.hidden = true; clearTimeout(panelTimer); }
+function hidePanel() {
+  panelEl.hidden = true;
+  panelText.textContent = '';
+  if (!resultsEl.children.length) emptyEl.style.display = '';
+}
 $('panel-close').addEventListener('click', hidePanel);
 
-async function openPanel(url, body) {
-  showPanel('Загружаю…');
+async function openPanel(url, title, method) {
+  showPanel(title, 'Загружаю…');
   try {
-    const res = await fetch(url, body ? { method: 'POST' } : undefined);
+    const res = await fetch(url, method ? { method } : undefined);
     const data = await res.json();
-    showPanel(data.text || JSON.stringify(data, null, 2));
+    showPanel(title, data.text || JSON.stringify(data, null, 2));
   } catch (err) {
-    showPanel('Ошибка: ' + err.message);
+    showPanel(title, 'Ошибка: ' + err.message);
   }
 }
-$('btn-status').addEventListener('click', () => openPanel('/api/status'));
-$('btn-info').addEventListener('click', () => openPanel('/api/info'));
+$('btn-status').addEventListener('click', () => openPanel('/api/status', 'Статус'));
+$('btn-info').addEventListener('click', () => openPanel('/api/info', 'Справка'));
 $('btn-clean').addEventListener('click', async () => {
   if (!confirm('Удалить все скачанные файлы и готовые клипы с этой машины?')) return;
-  showPanel('Удаляю…');
+  showPanel('Очистка', 'Удаляю…');
   try {
     const res = await fetch('/api/clean', { method: 'POST' });
     const data = await res.json();
-    showPanel(data.text || 'готово');
     resultsEl.innerHTML = '';
-    emptyEl.style.display = '';
     setStatus('Файлы удалены');
+    showPanel('Очистка', data.text || 'готово');
   } catch (err) {
-    showPanel('Ошибка: ' + err.message);
+    showPanel('Очистка', 'Ошибка: ' + err.message);
   }
 });
 
@@ -518,6 +525,7 @@ function toSeconds(text) {
 }
 
 function startTimer() {
+  hidePanel();
   startedAt = Date.now();
   clearInterval(tick);
   tick = setInterval(() => {
@@ -627,6 +635,7 @@ async function poll(id) {
     if (job.state === 'error') { renderProgress(job); setStatus(job.error || 'ошибка', 'err'); return; }
     if (job.state === 'done') {
       renderProgress(job);
+      hidePanel();
       setStatus('Готово · ' + plural(job.results.length, 'файл', 'файла', 'файлов'));
       job.results.forEach((r, i) => {
         const li = document.createElement('li');
