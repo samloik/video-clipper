@@ -19,6 +19,7 @@ re-download it, and everything is swept once the conversation goes quiet.
 
 from __future__ import annotations
 
+import html as html_lib
 import http.client
 import json
 import logging
@@ -62,76 +63,58 @@ URL_RE = re.compile(r"https?://\S+")
 # Characters a timecode may consist of: digits and any of the component
 # separators the parser understands (":12" is a valid 0:12).
 _TC_CHARS_RE = re.compile(r"^[\d:\\/.,]+$")
-INFO_TEMPLATE = r"""Как присылать запрос
+INFO_TEMPLATE = """<b>video-clipper</b> — нарезка по таймкодам
+Ссылка и таймкоды в одном сообщении:
 
-Ссылка и таймкоды в одном сообщении — в строку или с новой строки:
-https://youtu.be/ID 0:10-0:20
+<pre>https://youtu.be/ID 0:10-0:20</pre>
 
-ЧАСТИ ТАЙМКОДА разделяются любым из символов  :  ,  .  \  /
-  45          -> 0:00:45      одна часть — секунды
-  :12         -> 0:00:12      ведущий ноль можно опустить (но ":45" — это 45 с, а не 3:45)
-  34:43       -> 0:34:43      две части — минуты:секунды
-  1:12  1.12  1/12  1\12  1,12   -> 0:01:12
-  1:02:03     -> 1:02:03      три части — часы:минуты:секунды
-  1:12.500    -> 72.5 с       три цифры после точки/запятой — миллисекунды
+<b>ТАЙМКОД</b>
+<pre>45        0:00:45   секунды
+:12       0:00:12   можно без ведущего нуля
+34:43     0:34:43   минуты:секунды
+1:02:03   1:02:03   часы:минуты:секунды
+1:12.500  72.5 с    миллисекунды</pre>
+Вместо «:» подойдёт любой из  , . / \\  — «1/12» это 1 мин 12 с.
 
-ОТРЕЗКИ
-  начало-конец   0:10-0:20          с 10-й по 20-ю секунду
-  до конца       0:20-*             с 20-й секунды до конца ролика («*» = конец)
-  начало=длина   1:00=0:30          с 1:00 длиной 30 с, то есть 1:00–1:30
-  несколько      ;  разделитель:  0:10-0:20; 2:00=45; 3:30-3:45
-  можно и парой   0:10 0:20         два таймкода подряд — начало и конец
+<b>ОТРЕЗОК</b>
+<pre>0:10-0:20            с 10-й по 20-ю
+0:20-*               до конца ролика
+1:00=0:30            с 1:00 ровно 30 с
+0:10-0:20; 2:00=45   несколько через ;</pre>
+«=» это длительность, а не конец. Два таймкода подряд тоже работают: 0:10 0:20.
 
-РЕЖИМЫ — словом в том же сообщении
-  fast / быстро     без перекодирования, границы по ключевым кадрам (в разы быстрее)
-  вертикально       вертикальный кадр 9:16 (обрезает бока)
-  фон / размыт      вертикальный кадр с размытой подложкой
-  сместить 30       окно 9:16 сдвинуть: 0 — левый край, 50 — центр, 100 — правый
+<b>РЕЖИМ</b> — словом в том же сообщении
+<pre>fast              без перекодирования
+вертикально       9:16, бока обрезаны
+вертикально фон   9:16 на размытой подложке
+сместить 30       окно 9:16: 0 лево · 50 центр · 100 право</pre>
 
-ПРИМЕРЫ ЦЕЛИКОМ
-  https://youtu.be/ID 0:10-0:20
-      обычный точный отрезок, 10-я–20-я секунда
-  https://youtu.be/ID 0:10-0:20 fast
-      тот же отрезок без перекодирования (секунды вместо минут, границы по кадру)
-  https://youtu.be/ID 0:10-0:20 вертикально
-      9:16 для смартфона, бока обрезаны
-  https://youtu.be/ID 0:10-0:20 вертикально фон
-      9:16, кадр целиком на размытой подложке
-  https://youtu.be/ID 11-* вертикально сместить 30
-      с 11-й секунды до конца ролика, окно 9:16 сдвинуто влево на 30%
-  https://youtu.be/ID 1:00=30 вертикально окно 70%
-      с 1:00 ровно 30 с, окно сдвинуто вправо (70% от левого края)
-  https://youtu.be/ID 0:10-0:20; 2:00=45 fast
-      два отрезка за раз, оба без перекодирования
+<b>ПРИМЕРЫ</b>
+<pre>https://youtu.be/ID 0:10-0:20
+https://youtu.be/ID 0:10-0:20 fast
+https://youtu.be/ID 0:10-0:20 вертикально
+https://youtu.be/ID 0:10-0:20 вертикально фон
+https://youtu.be/ID 11-* вертикально сместить 30
+https://youtu.be/ID 1:00=30 вертикально окно 70%
+https://youtu.be/ID 0:10-0:20; 2:00=45 fast</pre>
 
-КОМАНДЫ
-  /info     эта памятка
-  /status   что лежит на машине, когда каждый файл удалится
-  /time     срок хранения: /time 1:30 — час тридцать (по умолчанию 30 минут)
-  /stop     прервать текущую нарезку
-  /resume   повторить последний запрос
-  /new      забыть запрос и удалить файлы
-  /clean    только удалить файлы
-  /id       chat_id для конфига
+<b>КОМАНДЫ</b>
+<pre>/info      эта памятка
+/status    файлы, время удаления, диск
+/time      срок хранения: /time 1:30
+/stop      прервать
+/resume    повторить
+/new       забыть запрос и очистить
+/clean     только файлы
+/id        chat_id</pre>
 
-ФАЙЛОМ
-  Отправь видео вложением (до 20 МБ — лимит Bot API), таймкоды напиши в подписи:
-  «0:10-0:20» или «вертикально 0:10=15». Без подписи — пришлю ролик целиком.
-  Больше 20 МБ бот скачать не может — такие файлы загружай в веб-интерфейсе.
+<b>ЕЩЁ</b>
+Видео файлом — до 20 МБ, таймкоды в подписи.
+Веб: {gui}
+Пароль: {gui_password}
+Хранение: {retention} тишины, меняется /time."""
 
-ВЕБ-ИНТЕРФЕЙС
-  {gui}
-  то же самое в браузере — с телефона или ноутбука в домашней сети.
-  Пароль лежит в файле: {gui_password}
 
-ОГРАНИЧЕНИЯ
-  Telegram принимает файлы до 50 МБ — больший клип бот режет на части без
-  пересжатия (качество не меняется) и присылает их по очереди с пометкой «часть i/n».
-  Режется один ролик за раз, следующие ждут в очереди.
-  Файлы живут {retention} после последнего использования; срок меняется командой
-  /time — например /time 45, /time 1:30 или /time 2ч.
-  Если YouTube требует подтверждение (бот-чек), бот делает паузу и повторяет
-  запрос сам через 15 минут — отменить повтор можно командой /stop."""
 
 
 def lan_ip() -> str:
@@ -166,8 +149,18 @@ def build_info(cfg: Config) -> str:
     from .timecode import format_retention
 
     return INFO_TEMPLATE.format(
-        gui=gui_url(cfg), gui_password=where, retention=format_retention(cfg.retention_minutes)
+        gui=html_lib.escape(gui_url(cfg)),
+        gui_password=html_lib.escape(where),
+        retention=html_lib.escape(format_retention(cfg.retention_minutes)),
     )
+
+
+_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def info_plain(cfg: Config) -> str:
+    """Та же памятка без разметки — на случай, если Telegram не принял HTML."""
+    return html_lib.unescape(_TAG_RE.sub("", build_info(cfg)))
 
 
 HELP = (
@@ -290,8 +283,11 @@ class Telegram:
             payload["offset"] = offset
         return self.call("getUpdates", payload, timeout=long_poll + 20)
 
-    def send_message(self, chat_id: int, text: str) -> dict:
-        return self.call("sendMessage", {"chat_id": chat_id, "text": text, "disable_web_page_preview": True})
+    def send_message(self, chat_id: int, text: str, parse_mode: str | None = None) -> dict:
+        payload = {"chat_id": chat_id, "text": text, "disable_web_page_preview": True}
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
+        return self.call("sendMessage", payload)
 
     def edit_message_text(self, chat_id: int, message_id: int, text: str) -> None:
         """Rewrite the status message; cosmetic failures must not break the job."""
@@ -1076,8 +1072,14 @@ def handle_message(bot, cfg: Config, message: dict, clipper=None) -> None:
         bot.send_message(chat_id, HELP.format(minutes=cfg.retention_minutes))
         return
     if command in ("/info", "/форматы"):
-        for chunk in split_long(build_info(cfg)):
-            bot.send_message(chat_id, chunk)
+        memo = build_info(cfg)
+        try:
+            bot.send_message(chat_id, memo, parse_mode="HTML")
+        except TelegramError as exc:
+            # разметка не прошла (старый клиент, битый тег) — не оставляем человека без памятки
+            log.warning("HTML-памятка не отправилась (%s), отправляю текстом", exc)
+            for chunk in split_long(info_plain(cfg)):
+                bot.send_message(chat_id, chunk)
         return
     if command == "/id":
         bot.send_message(chat_id, f"chat_id: {chat_id}")

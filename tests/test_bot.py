@@ -11,8 +11,10 @@ import pytest
 
 from video_clipper.bot import (
     ProgressReporter,
+    TelegramError,
     handle_callback,
     build_info,
+    info_plain,
     clip_caption,
     describe_request,
     estimate_seconds,
@@ -695,15 +697,44 @@ class TestParseRequest:
     def test_info_shows_the_gui_address(self):
         cfg = _cfg(Path("/tmp")).with_overrides(gui_host="0.0.0.0", gui_port=8766)
         memo = build_info(cfg)
-        assert "ВЕБ-ИНТЕРФЕЙС" in memo
+        assert "Веб:" in memo
         assert ":8766" in memo and memo.count("http://") >= 1
         assert "Пароль" in memo
+
+    def test_info_is_html_and_fits_one_message(self, tmp_path):
+        memo = build_info(_cfg(tmp_path))
+        assert len(memo) < 4096, "памятка должна уходить одним сообщением"
+        for tag in ("b", "pre"):
+            assert memo.count(f"<{tag}>") == memo.count(f"</{tag}>"), tag
+        assert "<table" not in memo and "<a href" not in memo
+
+    def test_info_goes_out_with_html_mode(self, tmp_path):
+        bot = FakeBot()
+        handle_message(bot, _cfg(tmp_path), {"chat": {"id": 1}, "text": "/info"})
+        assert bot.parse_modes == ["HTML"]
+
+    def test_html_failure_falls_back_to_plain_text(self, tmp_path):
+        class StrictBot(FakeBot):
+            def send_message(self, chat_id, text, parse_mode=None):
+                if parse_mode:
+                    raise TelegramError("can't parse entities")
+                return super().send_message(chat_id, text, parse_mode)
+
+        bot = StrictBot()
+        handle_message(bot, _cfg(tmp_path), {"chat": {"id": 1}, "text": "/info"})
+        memo = "\n".join(text for _, text in bot.messages)
+        assert "<b>" not in memo and "<pre>" not in memo
+        assert "ТАЙМКОД" in memo and "ПРИМЕРЫ" in memo
+
+    def test_plain_text_keeps_alignment(self, tmp_path):
+        plain = info_plain(_cfg(tmp_path))
+        assert "45        0:00:45   секунды" in plain
 
     def test_info_command(self):
         bot = FakeBot()
         handle_message(bot, _cfg(Path("/tmp")), {"chat": {"id": 1}, "text": "/info"})
         memo = "\n".join(text for _, text in bot.messages)
-        for needle in ("начало=длина", "миллисекунды", "0:10-0:20", "/stop", ";  разделитель"):
+        for needle in ("1:00=0:30", "миллисекунды", "0:10-0:20", "/stop", "несколько через ;"):
             assert needle in memo, needle
 
     def test_two_ranges(self):
@@ -749,9 +780,11 @@ class FakeBot:
         self.markups: list[dict | None] = []
         self.answered: list[str] = []
         self.edits: list[tuple[int, int, str]] = []
+        self.parse_modes: list[str | None] = []
 
-    def send_message(self, chat_id, text):
+    def send_message(self, chat_id, text, parse_mode=None):
         self.messages.append((chat_id, text))
+        self.parse_modes.append(parse_mode)
         return {"message_id": len(self.messages)}
 
     def edit_message_text(self, chat_id, message_id, text):
