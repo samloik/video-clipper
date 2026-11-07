@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from video_clipper.bot import describe_request, handle_message, parse_request, split_long
+from video_clipper.bot import clip_caption, describe_request, handle_message, parse_request, split_long
 from video_clipper.config import load_config
 from video_clipper.cut import ClipResult
 from video_clipper.segments import Segment
@@ -336,7 +336,8 @@ class TestFastButton:
         bot = FakeBot()
         handle_callback(bot, _cfg(tmp_path), self._callback())
         assert len(bot.videos) == 1
-        assert "fast" in bot.videos[0][2]
+        assert "<00:00:10–00:00:11>" in bot.videos[0][2]
+        assert "без перекодирования" in " ".join(text for _, text in bot.messages)
         assert bot.videos[0][1].name.endswith("-fast.mp4")
         assert any("Готово" in text for _, text in bot.messages)
 
@@ -422,6 +423,28 @@ def _request(text: str):
     request = parse_request(text)
     assert request is not None, text
     return request
+
+
+class TestClipCaption:
+    def test_format_is_title_link_timecodes_duration(self):
+        caption = clip_caption("Ограбление века", "https://youtu.be/ID", Segment(0, 12), 12.08)
+        assert caption == "Ограбление века - https://youtu.be/ID - <00:00:00–00:00:12> - 12.08 с"
+
+    def test_long_title_is_trimmed(self):
+        caption = clip_caption("я" * 100, "https://youtu.be/ID", Segment(0, 12), 12.0)
+        assert caption.startswith("я" * 69 + "…")
+        assert "<00:00:00–00:00:12>" in caption
+
+    def test_missing_title_falls_back(self):
+        assert clip_caption("", "https://youtu.be/ID", Segment(5, 7), 2.0).startswith("видео - ")
+
+    def test_bot_caption_contains_title_link_and_timecodes(self, tmp_path):
+        bot = FakeBot()
+        handle_message(bot, _cfg(tmp_path), {"chat": {"id": 1}, "text": "https://youtu.be/x 0:00-0:12"},
+                       clipper=make_clipper(tmp_path))
+        assert bot.videos, "видео должно уйти"
+        caption = bot.videos[0][2]
+        assert caption.endswith("<00:00:00–00:00:12> - 12.00 с")
 
 
 class TestDescribeRequest:

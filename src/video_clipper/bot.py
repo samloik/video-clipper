@@ -467,6 +467,14 @@ def _plural(count: int, one: str, few: str, many: str) -> str:
     return many
 
 
+def clip_caption(title: str, source: str, segment: Segment, duration: float) -> str:
+    """«Название ролика - ссылка - <00:00:00–00:00:12> - 12.08 с»."""
+    name = (title or "").strip() or "видео"
+    if len(name) > 70:
+        name = name[:69].rstrip() + "…"
+    return f"{name} - {source} - <{segment.label}> - {duration:.2f} с"
+
+
 def describe_request(request: "Request", limit: int = 8) -> str:
     """Repeat the parsed request back, so a misread timecode is visible at once."""
     from .timecode import human_timecode
@@ -703,7 +711,12 @@ def handle_message(bot, cfg: Config, message: dict, clipper=None) -> None:
         JOBS[job_key] = job
 
     for index, result in enumerate(results):
-        caption = f"{result.segment.label} · {result.mode} · {result.duration:.2f} с"
+        caption = clip_caption(
+            (job or {}).get("title", ""),
+            (job or {}).get("source", request.source),
+            result.segment,
+            result.duration,
+        )
         is_last = index == len(results) - 1
         markup = (
             recut_keyboard(
@@ -817,14 +830,11 @@ def handle_callback(bot, cfg: Config, callback: dict) -> None:
             bot.send_message(chat_id, f"Не смог перерезать: {exc}")
             continue
         try:
-            label = "fast (без перекодирования)" if fast else (
-                "9:16 размытый фон" if layout == "blur" else "9:16"
-            )
             send_video_smart(
                 bot,
                 chat_id,
                 Path(result.output_path),
-                f"{shown.label} · {label} · {result.duration:.2f} с",
+                clip_caption(job.get("title", ""), job.get("source", ""), shown, result.duration),
                 has_audio=bool(job.get("has_audio", True)),
             )
             sent += 1
