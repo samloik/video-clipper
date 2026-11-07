@@ -475,9 +475,31 @@ def clip_caption(title: str, source: str, segment: Segment, duration: float) -> 
     return f"{name} - {source} - <{segment.label}> - {duration:.2f} с"
 
 
+# Rough speed model, calibrated on the real runs of this bot (720p, SOCKS proxy):
+# an accurate cut costs ~0.65 s of CPU per second of video plus ~0.45 s of
+# download, a copy cut ~0.26 s. The answer is a range, never a promise.
+ENCODE_RATE = {"accurate": 0.65, "fast": 0.26}
+DOWNLOAD_RATE = 0.45
+ESTIMATE_OVERHEAD = 15.0
+
+
+def estimate_seconds(request: "Request") -> tuple[float, float] | None:
+    """Low and high estimate for the whole job, or None when it is unknowable."""
+    total = sum(seg.duration for seg in request.segments)
+    if total <= 0:
+        return None
+    per_second = ENCODE_RATE["fast" if request.fast else "accurate"] + DOWNLOAD_RATE
+    if request.vertical:
+        per_second *= 1.25
+    if request.layout == "blur":
+        per_second *= 1.15
+    work = ESTIMATE_OVERHEAD + total * per_second
+    return work * 0.65, work * 1.8
+
+
 def describe_request(request: "Request", limit: int = 8) -> str:
     """Repeat the parsed request back, so a misread timecode is visible at once."""
-    from .timecode import human_timecode
+    from .timecode import human_duration, human_timecode
 
     modes = [
         name
@@ -504,6 +526,13 @@ def describe_request(request: "Request", limit: int = 8) -> str:
         )
     if count > limit:
         lines.append(f"...и ещё {count - limit}")
+    estimate = estimate_seconds(request)
+    if estimate is not None:
+        low, high = estimate
+        lines.append(
+            f"Ожидаю примерно {human_duration(low)} – {human_duration(high)} "
+            f"(оценка по прошлым запускам)"
+        )
     lines.append("Режу...")
     return "\n".join(lines)
 

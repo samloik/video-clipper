@@ -126,6 +126,18 @@ def human_timecode(seconds: float) -> str:
     return f"{int(minutes)}:{sec_text}"
 
 
+def human_duration(seconds: float) -> str:
+    """Length in words: ``20 с``, ``3 мин 20 с``, ``1 ч 05 мин``."""
+    total = int(round(float(seconds)))
+    if total < 60:
+        return f"{total} с"
+    minutes, secs = divmod(total, 60)
+    if minutes < 60:
+        return f"{minutes} мин" if secs == 0 else f"{minutes} мин {secs} с"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours} ч {minutes:02d} мин"
+
+
 def filename_timecode(seconds: float) -> str:
     """Compact, filesystem-safe timecode: ``HHMMSS`` or ``HHMMSS-mmm``."""
     total = round(float(seconds), 3)

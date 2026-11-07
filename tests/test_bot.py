@@ -8,7 +8,14 @@ from pathlib import Path
 
 import pytest
 
-from video_clipper.bot import clip_caption, describe_request, handle_message, parse_request, split_long
+from video_clipper.bot import (
+    clip_caption,
+    describe_request,
+    estimate_seconds,
+    handle_message,
+    parse_request,
+    split_long,
+)
 from video_clipper.config import load_config
 from video_clipper.cut import ClipResult
 from video_clipper.segments import Segment
@@ -423,6 +430,41 @@ def _request(text: str):
     request = parse_request(text)
     assert request is not None, text
     return request
+
+
+class TestEstimate:
+    def _estimate(self, text):
+        value = estimate_seconds(_request(text))
+        assert value is not None, text
+        return value
+
+    def test_range_is_sane_for_a_short_clip(self):
+        low, high = self._estimate("https://youtu.be/x 0:00-0:12")
+        assert 10 <= low < high <= 90
+
+    def test_fast_is_quicker_than_accurate(self):
+        fast = self._estimate("https://youtu.be/x 0:00-1:00 fast")
+        accurate = self._estimate("https://youtu.be/x 0:00-1:00")
+        assert fast[1] < accurate[1]
+
+    def test_vertical_and_blur_add_time(self):
+        plain = self._estimate("https://youtu.be/x 0:00-1:00")
+        vertical = self._estimate("https://youtu.be/x 0:00-1:00 вертикально")
+        blurred = self._estimate("https://youtu.be/x 0:00-1:00 вертикально фон")
+        assert plain[0] < vertical[0] < blurred[0]
+
+    def test_grows_with_length(self):
+        short = self._estimate("https://youtu.be/x 0:00-0:20")
+        long = self._estimate("https://youtu.be/x 0:00-10:00")
+        assert long[1] > short[1] * 5
+
+    def test_whole_video_has_no_estimate(self):
+        assert estimate_seconds(self._request("https://youtu.be/x")) is None
+
+    def test_echo_shows_the_estimate(self):
+        text = describe_request(_request("https://youtu.be/x 0:00-0:12"))
+        assert "Ожидаю примерно" in text
+        assert text.rstrip().endswith("Режу...")
 
 
 class TestClipCaption:
