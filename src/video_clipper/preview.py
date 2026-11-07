@@ -102,6 +102,23 @@ _LINK_ID_RE = {
 }
 
 
+UNAVAILABLE_SIGNS = (
+    "video is unavailable",
+    "video unavailable",
+    "this video is private",
+    "removed by the uploader",
+    "has been terminated",
+    "members-only",
+    "is not available in your country",
+)
+
+
+def unavailable_video(exc: BaseException | str) -> bool:
+    """Сайт говорит, что видео нет/оно закрыто — повторять бессмысленно."""
+    text = (exc if isinstance(exc, str) else str(exc)).lower()
+    return any(sign in text for sign in UNAVAILABLE_SIGNS)
+
+
 def link_problem(source: str) -> str:
     """Ссылка, которая заведомо не сработает — чтобы не ходить за кадром впустую.
 
@@ -284,6 +301,9 @@ def _stream_info_locked(source: str, cfg: Config) -> tuple[str, dict]:
                 log.info("Поток через %s (%s) не получен: %s", client, fmt or "любой", str(exc)[:110])
                 if "Requested format is not available" in str(exc):
                     continue
+                if unavailable_video(exc):
+                    # приватное/удалённое видео: другие клиенты и форматы не помогут
+                    raise
                 break
             if info.get("url"):
                 break

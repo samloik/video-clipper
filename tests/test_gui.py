@@ -446,6 +446,41 @@ class TestOpenEnd:
         assert seen["open_ends"] == [True]
 
 
+class TestUnavailableVideo:
+    """«Видео недоступно» — это не таймаут: причину надо назвать сразу."""
+
+    def test_message_names_the_reason(self):
+        from video_clipper.gui import _preview_error
+
+        exc = RuntimeError("ERROR: [youtube] CQGchYrnYhU: This video is unavailable")
+        text = _preview_error(exc)
+        assert "видео недоступно" in text
+        assert "приватное" in text
+
+    def test_private_and_removed_are_recognised(self):
+        from video_clipper.preview import unavailable_video
+
+        assert unavailable_video("Video unavailable")
+        assert unavailable_video("This video is private")
+        assert unavailable_video("This video has been removed by the uploader")
+        assert not unavailable_video("Requested format is not available")
+
+    def test_no_second_client_for_a_dead_video(self, cfg, monkeypatch):
+        import video_clipper.source as source_module
+        from video_clipper.preview import stream_info
+
+        calls = []
+
+        def fail(url, opts):
+            calls.append(opts.get("extractor_args"))
+            raise RuntimeError("ERROR: [youtube] X: This video is unavailable")
+
+        monkeypatch.setattr(source_module, "_ytdlp_extract", fail)
+        with pytest.raises(RuntimeError):
+            stream_info("https://youtu.be/DEAD1", cfg)
+        assert len(calls) == 1, "после «недоступно» других клиентов не пробуем"
+
+
 class TestDurationEndpoint:
     """Длительность по запросу: шаг «− кадр» от «до конца» без неё не работает."""
 
@@ -491,7 +526,8 @@ class TestFrameBudget:
 
         assert "setTimeout(() => {" in PAGE
         assert "45000" in PAGE
-        assert "кадр не пришёл за 45 с" in PAGE
+        assert "сервер не успел за 45 с — нажми ещё раз" in PAGE
+        assert "shortReason(data.error)" in PAGE
 
 
 class TestEtaWithoutEstimate:

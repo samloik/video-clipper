@@ -33,6 +33,7 @@ from .probe import EnvironmentProblem, check_tools
 from .preview import (
     cached_frame,
     cached_stream,
+    unavailable_video,
     closest_frame,
     ensure_window,
     find_window,
@@ -710,6 +711,16 @@ const panelEl = $('panel'), panelText = $('panel-text');
 const progressEl = $('progress'), barEl = $('bar'), etaEl = $('eta');
 let durationPending = false;
 
+function shortReason(text, limit) {
+  const cut = limit || 52;
+  const line = String(text || '').replace(/\\s+/g, ' ').trim();
+  if (!line) return '';
+  if (line.length <= cut) return line;
+  const clipped = line.slice(0, cut);
+  const space = clipped.lastIndexOf(' ');
+  return (space > cut * 0.6 ? clipped.slice(0, space) : clipped) + '…';
+}
+
 function fmtSeconds(value) {
   const s = Math.round(value);
   if (s < 60) return s + ' с';
@@ -1199,7 +1210,7 @@ async function loadFrame(img, tc, onMissing, noteEl, suffix) {
   // страховка на зависшее соединение: сервер укладывается в 45 с, но если ответ
   // вообще не придёт, вертушка не должна крутиться минутами
   deadline = setTimeout(() => {
-    if (fresh()) { hideBusy(); mark('· кадр не пришёл за 45 с'); }
+    if (fresh()) { hideBusy(); mark('· сервер не успел за 45 с — нажми ещё раз'); }
   }, 45000);
 
   try {
@@ -1208,8 +1219,9 @@ async function loadFrame(img, tc, onMissing, noteEl, suffix) {
     if (!res.ok) {
       hideBusy();
       const data = await res.json().catch(() => ({}));
-      // старый кадр не стираем, но и молчать нельзя: подписываем, что он устарел
-      mark('· кадр не получен');
+      // старый кадр не стираем, но и молчать нельзя: причина от сервера важнее
+      // общей фразы — она говорит, что именно делать
+      mark('· ' + (shortReason(data.error) || 'кадр не получен'));
       if (onMissing) onMissing(data.error || '');
       return;
     }
@@ -1226,7 +1238,7 @@ async function loadFrame(img, tc, onMissing, noteEl, suffix) {
     };
     mark(res.headers.get('X-Frame-Approx') ? '· ближайший кадр' : (suffix || ''));
   } catch (err) {
-    mark('· кадр не получен');
+    mark('· сеть не ответила — нажми ещё раз');
     if (onMissing) onMissing('');
   }
   // busy снимаем только свежий запрос: иначе он погасит вертушку более нового
@@ -1847,6 +1859,11 @@ def _preview_error(exc: Exception) -> str:
         return (
             "сайт просит подтвердить, что мы не робот. Это ограничение IP и проходит само: "
             "повтори через 10–15 минут"
+        )
+    if unavailable_video(exc):
+        return (
+            "видео недоступно: приватное, удалённое или ссылка неверна. "
+            "Открой её в браузере — если ролик не играет, дело в ссылке или доступе"
         )
     return f"не удалось скачать кусок для кадров: {text}"
 
