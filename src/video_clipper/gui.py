@@ -143,18 +143,38 @@ class Auth:
 
     @staticmethod
     def _load_secret(path: Path | None) -> bytes:
+        raw = b""
         if path is not None:
             try:
-                data = path.read_bytes().strip()
+                raw = path.read_bytes()
             except OSError:
-                data = b""
-            if len(data) >= 32:
-                return data
+                raw = b""
+        # Новый формат — 64 символа hex. Так ключ нельзя испортить обрезкой
+        # пробельных байтов: раньше ключ, случайно оканчивавшийся на \r, \n или
+        # пробел, после strip() становился короче, считался битым и генерировался
+        # заново — сессии пропадали после перезапуска (примерно в 2% случаев).
+        text = raw.strip()
+        if len(text) == 64:
+            try:
+                return bytes.fromhex(text.decode("ascii"))
+            except (UnicodeDecodeError, ValueError):
+                pass
+        # Старый формат — 32 сырых байта плюс перевод строки: берём ровно 32
+        # и сразу переводим файл в hex, чтобы больше не зависеть от пробельных байтов.
+        if len(raw) in (32, 33):
+            legacy = raw[:32]
+            if path is not None:
+                try:
+                    path.write_text(legacy.hex() + "\n", encoding="ascii")
+                    os.chmod(path, 0o600)
+                except OSError:
+                    pass
+            return legacy
         secret = secrets.token_bytes(32)
         if path is not None:
             try:
                 path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_bytes(secret + b"\n")
+                path.write_text(secret.hex() + "\n", encoding="ascii")
                 os.chmod(path, 0o600)
             except OSError:
                 log.warning("не смог сохранить ключ сессий в %s", path)

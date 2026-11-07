@@ -159,6 +159,40 @@ class TestAuth:
         status, body, _ = _get(other + "/", cookie=cookie)
         assert status == 200, "ключ сессий лежит на диске — «запомнить» переживает рестарт"
 
+    def test_secret_ending_with_a_whitespace_byte_survives_a_restart(self, tmp_path):
+        """Ключ, оканчивающийся на \r, раньше читался короче и терялся целиком."""
+        import video_clipper.gui as gui_module
+
+        path = tmp_path / "gui.secret"
+        real = gui_module.secrets.token_bytes
+        gui_module.secrets.token_bytes = lambda n: b"\x11" * (n - 1) + b"\n"
+        try:
+            first = gui_module.Auth("pw", path)
+        finally:
+            gui_module.secrets.token_bytes = real
+        second = gui_module.Auth("pw", path)
+        token = first.token()
+        assert second.check_cookie(token), "после рестарта сессия должна остаться живой"
+
+    def test_secret_is_stored_as_hex_text(self, tmp_path):
+        import video_clipper.gui as gui_module
+
+        path = tmp_path / "gui.secret"
+        auth = gui_module.Auth("pw", path)
+        stored = path.read_text(encoding="ascii").strip()
+        assert len(stored) == 64 and all(c in "0123456789abcdef" for c in stored)
+        assert bytes.fromhex(stored) == auth._secret
+
+    def test_old_raw_secret_is_still_honoured(self, tmp_path):
+        import video_clipper.gui as gui_module
+
+        path = tmp_path / "gui.secret"
+        path.write_bytes(b"\x22" * 32 + b"\n")
+        assert gui_module.Auth("pw", path)._secret == b"\x22" * 32
+        # старый файл переписан в hex: дальше ключ не зависит от пробельных байтов
+        stored = path.read_text(encoding="ascii").strip()
+        assert len(stored) == 64 and stored == (b"\x22" * 32).hex()
+
     def test_cookie_signed_by_another_secret_is_rejected(self, cfg, tmp_path):
         first = create_server(cfg, fake_clipper(tmp_path / "c.mp4"), host="0.0.0.0",
                               port=0, password="s3cret")
