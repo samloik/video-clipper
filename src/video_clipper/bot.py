@@ -80,6 +80,11 @@ https://youtu.be/ID 0:10-0:20
   /clean    только удалить файлы
   /id       chat_id для конфига
 
+ФАЙЛОМ
+  Отправь видео вложением (до 20 МБ — лимит Bot API), таймкоды напиши в подписи:
+  «0:10-0:20» или «вертикально 0:10=15». Без подписи — пришлю ролик целиком.
+  Больше 20 МБ бот скачать не может — такие файлы загружай в веб-интерфейсе.
+
 ВЕБ-ИНТЕРФЕЙС
   {gui}
   то же самое в браузере — с телефона или ноутбука в домашней сети.
@@ -140,6 +145,7 @@ HELP = (
     "Словом тоже можно: «вертикально», «9:16», «шортс», а «размытый фон» — фон вместо обрезки.\n"
     "Пришли только ссылку без таймкодов — отдам ролик целиком (большие файлы сожму до 45 МБ).\n\n"
     "/stop — остановить текущую нарезку, /resume — повторить последний запрос.\n"
+    "Видео можно прислать файлом (до 20 МБ) — таймкоды пиши в подписи.\n"
     "/new — начать с чистого листа, /clean — только удалить файлы, /status — что на машине.\n"
     f"Файлы удаляются автоматически через {{minutes}} мин тишины."
 )
@@ -258,6 +264,31 @@ class Telegram:
             )
         except TelegramError:
             pass
+
+    def get_file(self, file_id: str) -> dict:
+        return self.call("getFile", {"file_id": file_id})
+
+    def download_file(self, file_path: str, dest: Path, progress=None) -> Path:
+        """Download a file the user sent to the bot (Bot API caps this at 20 MB)."""
+        url = f"{API_BASE}/file/bot{self.token}/{file_path}"
+        dest = Path(dest)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with self._opener.open(url, timeout=300) as resp, dest.open("wb") as out:
+                total = int(resp.headers.get("Content-Length") or 0)
+                done = 0
+                while True:
+                    chunk = resp.read(1 << 16)
+                    if not chunk:
+                        break
+                    out.write(chunk)
+                    done += len(chunk)
+                    if progress is not None and total:
+                        progress(done / total, done)
+        except (urllib.error.URLError, TimeoutError) as exc:
+            dest.unlink(missing_ok=True)
+            raise TelegramError(f"скачивание не удалось: {exc}") from exc
+        return dest
 
     def send_chat_action(self, chat_id: int, action: str = "upload_video") -> None:
         try:
@@ -539,7 +570,7 @@ def clip_for_bot(
 
 
 def parse_request(text: str) -> Request | None:
-    """Extract the link, its timecode ranges and the mode flags from a message.
+    r"""Extract the link, its timecode ranges and the mode flags from a message.
 
     Ranges are written as ``НАЧАЛО-КОНЕЦ`` or ``НАЧАЛО=ДЛИТЕЛЬНОСТЬ`` and chained
     with ``;``. Inside a timecode any of ``: , . \ /`` may separate the parts, and
@@ -554,6 +585,12 @@ def parse_request(text: str) -> Request | None:
     source = url_match.group(0).rstrip(".,)")
     rest = raw.replace(url_match.group(0), " ")
 
+    segments, fast, vertical, layout = parse_flags_and_segments(rest)
+    return Request(source=source, segments=segments, fast=fast, vertical=vertical, layout=layout)
+
+
+def parse_flags_and_segments(rest: str) -> tuple[list[Segment], bool, bool, str]:
+    """Timecodes and mode words from message text, with the link already removed."""
     fast = bool(re.search(r"\b(fast|быстро|быстрый)\b", rest, re.IGNORECASE))
     vertical = bool(
         re.search(r"\b(vertical|вертикаль\w*|9\s*[:xх]\s*16|шортс\w*|reels?)\b", rest, re.IGNORECASE)
@@ -567,8 +604,7 @@ def parse_request(text: str) -> Request | None:
         rest,
         flags=re.IGNORECASE,
     )
-    segments = segments_from_text(body)
-    return Request(source=source, segments=segments, fast=fast, vertical=vertical, layout=layout)
+    return segments_from_text(body), fast, vertical, layout
 
 
 def _plural(count: int, one: str, few: str, many: str) -> str:
@@ -630,8 +666,6 @@ def describe_request(
             f"Таймкодов нет — беру ролик целиком{mode_text}.\n"
             f"Качаю, это может занять пару минут..."
         )
-    from .timecode import human_duration
-
     count = len(request.segments)
     lines = [f"Понял так — {count} {_plural(count, 'отрезок', 'отрезка', 'отрезков')}{mode_text}:"]
     if duration > 0:
@@ -654,6 +688,70 @@ def describe_request(
         )
     lines.append("Режу...")
     return "\n".join(lines)
+
+
+# Bots may download at most 20 MB through the Bot API; keep a margin.
+MAX_BOT_DOWNLOAD = 19 * 1024 * 1024
+ATTACHMENT_KEYS = ("video", "video_note", "animation", "document", "audio")
+
+
+def attachment_item(message: dict) -> dict | None:
+    """The media the user attached to this message, if any."""
+    for key in ATTACHMENT_KEYS:
+        item = message.get(key)
+        if isinstance(item, dict) and item.get("file_id"):
+            return item
+    return None
+
+
+def attachment_name(item: dict, fallback: str = "video") -> str:
+    name = str(item.get("file_name") or "").strip()
+    if name:
+        return Path(name).name
+    mime = str(item.get("mime_type") or "")
+    ext = ".mp4"
+    if "quicktime" in mime:
+        ext = ".mov"
+    elif "webm" in mime:
+        ext = ".webm"
+    elif "matroska" in mime:
+        ext = ".mkv"
+    elif "audio" in mime:
+        ext = ".m4a"
+    unique = str(item.get("file_unique_id") or uuid.uuid4().hex)[:8]
+    return f"{fallback}-{unique}{ext}"
+
+
+def request_from_attachment(bot, cfg: Config, chat_id: int, item: dict, caption: str):
+    """Download a video the user sent and turn it into a request."""
+    size = int(item.get("file_size") or 0)
+    if size > MAX_BOT_DOWNLOAD:
+        bot.send_message(
+            chat_id,
+            f"Файл {size / 1048576:.0f} МБ — Telegram не отдаёт ботам файлы больше 20 МБ, "
+            f"поэтому скачать его я не могу.\n"
+            f"Загрузи этот файл в веб-интерфейсе — там лимит 4 ГБ: {gui_url(cfg)}",
+        )
+        return None
+
+    name = attachment_name(item)
+    bot.send_message(chat_id, f"Скачиваю «{name}» ({size / 1048576:.1f} МБ)...")
+    try:
+        info = bot.get_file(item["file_id"])
+        file_path = info.get("file_path")
+        if not file_path:
+            raise TelegramError("Telegram не вернул путь к файлу")
+        target = Path(cfg.cache_dir).expanduser() / f"upload-{uuid.uuid4().hex[:8]}-{name}"
+        bot.download_file(file_path, target)
+    except Exception as exc:  # noqa: BLE001 — the chat is the error channel
+        log.exception("Не удалось скачать вложение")
+        bot.send_message(chat_id, f"Не смог скачать файл: {exc}")
+        return None
+
+    segments, fast, vertical, layout = parse_flags_and_segments(caption or "")
+    return Request(
+        source=str(target), segments=segments, fast=fast, vertical=vertical, layout=layout
+    )
 
 
 RETRY_DELAY_MINUTES = 15.0
@@ -874,7 +972,9 @@ def handle_message(bot, cfg: Config, message: dict, clipper=None) -> None:
     """One incoming message → reply, clips, cleanup."""
     chat_id = int(message.get("chat", {}).get("id", 0))
     text = (message.get("text") or "").strip()
-    if not chat_id or not text:
+    caption = (message.get("caption") or "").strip()
+    media = attachment_item(message)
+    if not chat_id or (not text and not caption and media is None):
         return
 
     if cfg.telegram_chat_ids and chat_id not in cfg.telegram_chat_ids:
@@ -959,10 +1059,20 @@ def handle_message(bot, cfg: Config, message: dict, clipper=None) -> None:
         )
         return
 
-    request = parse_request(text)
-    if request is None:
-        bot.send_message(chat_id, "Не вижу ссылки. Пришли ссылку и таймкоды, например:\nhttps://youtu.be/ID 0:10-0:20")
-        return
+    if media is not None:
+        request = request_from_attachment(bot, cfg, chat_id, media, caption or text)
+        if request is None:
+            return
+    else:
+        request = parse_request(text)
+        if request is None:
+            bot.send_message(
+                chat_id,
+                "Не вижу ссылки. Пришли ссылку и таймкоды, например:\n"
+                "https://youtu.be/ID 0:10-0:20\n\n"
+                "Или отправь видео файлом (до 20 МБ) — таймкоды можно написать в подписи.",
+            )
+            return
     if not request.segments:
         bot.send_message(chat_id, "Таймкодов нет — пришлю ролик целиком.")
 
@@ -998,9 +1108,20 @@ def handle_message(bot, cfg: Config, message: dict, clipper=None) -> None:
     job: dict | None = None
     try:
         if clipper is not None:
-            results = clipper(
-                request.source, request.segments, request.fast, cfg, progress=reporter.update
-            )
+            try:
+                results = clipper(
+                    request.source,
+                    request.segments,
+                    request.fast,
+                    cfg,
+                    progress=reporter.update,
+                    vertical=request.vertical,
+                    layout=request.layout,
+                )
+            except TypeError:  # a clipper that does not know about vertical/layout
+                results = clipper(
+                    request.source, request.segments, request.fast, cfg, progress=reporter.update
+                )
         else:
             results, job = clip_for_bot(
                 request.source,

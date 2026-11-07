@@ -117,6 +117,88 @@ class TestSendPolicy:
         assert len(bot.videos) == 1
 
 
+class TestAttachment:
+    def _message(self, **extra):
+        message = {"chat": {"id": 1}, "caption": ""}
+        message.update(extra)
+        return message
+
+    def test_video_with_caption_is_cut(self, tmp_path):
+        seen = {}
+
+        def clipper(source, segments, fast, cfg, progress=None, vertical=False, layout="crop"):
+            seen.update(source=source, segments=[(s.start, s.end) for s in segments], vertical=vertical)
+            return []
+
+        bot = FakeBot()
+        bot.next_file_size = 5 * 1024 * 1024
+        handle_message(
+            bot,
+            _cfg(tmp_path),
+            self._message(video={"file_id": "AAA", "file_size": 5 * 1024 * 1024,
+                                 "mime_type": "video/mp4"}, caption="0:10-0:20"),
+            clipper=clipper,
+        )
+        assert seen["segments"] == [(10.0, 20.0)]
+        assert Path(seen["source"]).is_file(), "файл должен быть скачан в кеш"
+        assert "Скачиваю" in " ".join(t for _, t in bot.messages)
+        assert bot.files_requested == ["AAA"]
+
+    def test_document_without_caption_is_whole_video(self, tmp_path):
+        seen = {}
+
+        def clipper(source, segments, fast, cfg, progress=None, vertical=False, layout="crop"):
+            seen.update(segments=list(segments))
+            return []
+
+        bot = FakeBot()
+        bot.next_file_size = 1024 * 1024
+        handle_message(
+            bot,
+            _cfg(tmp_path),
+            self._message(document={"file_id": "DOC", "file_size": 1024 * 1024,
+                                    "file_name": "lecture.mkv",
+                                    "mime_type": "video/x-matroska"}),
+            clipper=clipper,
+        )
+        assert seen["segments"] == [], "без подписи — целиком"
+        assert any("лекцию" in t.lower() or "целиком" in t.lower() for _, t in bot.messages)
+
+    def test_too_big_attachment_is_refused_with_a_hint(self, tmp_path):
+        bot = FakeBot()
+        bot.next_file_size = 60 * 1024 * 1024
+        called = []
+        handle_message(
+            bot,
+            _cfg(tmp_path),
+            self._message(video={"file_id": "BIG", "file_size": 60 * 1024 * 1024,
+                                 "mime_type": "video/mp4"}, caption="0:00-0:10"),
+            clipper=lambda *a, **k: called.append(1) or [],
+        )
+        text = "\n".join(t for _, t in bot.messages)
+        assert "больше 20 МБ" in text
+        assert "http://" in text, "должна быть ссылка на GUI"
+        assert called == [], "нарезку не запускаем"
+
+    def test_vertical_caption_word_works_for_files(self, tmp_path):
+        seen = {}
+
+        def clipper(source, segments, fast, cfg, progress=None, vertical=False, layout="crop"):
+            seen.update(vertical=vertical, layout=layout)
+            return []
+
+        bot = FakeBot()
+        bot.next_file_size = 2 * 1024 * 1024
+        handle_message(
+            bot,
+            _cfg(tmp_path),
+            self._message(video={"file_id": "V", "file_size": 2 * 1024 * 1024,
+                                 "mime_type": "video/mp4"}, caption="вертикально фон 0:05=10"),
+            clipper=clipper,
+        )
+        assert seen == {"vertical": True, "layout": "blur"}
+
+
 class TestBotCheckRetry:
     def test_bot_check_schedules_a_retry_and_says_why(self, tmp_path, monkeypatch):
         import video_clipper.bot as botmod
@@ -469,6 +551,17 @@ class FakeBot:
 
     def edit_message_text(self, chat_id, message_id, text):
         self.edits.append((chat_id, message_id, text))
+
+    def get_file(self, file_id):
+        self.files_requested = getattr(self, "files_requested", []) + [file_id]
+        return {"file_path": f"videos/{file_id}.mp4", "file_size": self.next_file_size}
+
+    def download_file(self, file_path, dest, progress=None):
+        Path(dest).parent.mkdir(parents=True, exist_ok=True)
+        Path(dest).write_bytes(b"video-bytes")
+        if progress:
+            progress(1.0, 12)
+        return Path(dest)
 
     def send_video(self, chat_id, path, caption="", reply_markup=None):
         self.videos.append((chat_id, Path(path), caption))
