@@ -2,14 +2,25 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
 
 from video_clipper.config import load_config
 from video_clipper.segments import Segment
-from video_clipper.source import Source, SourceError, is_url, prepare_source
+from video_clipper.source import (
+    YT_CLIENTS,
+    ChallengeCooldown,
+    Source,
+    SourceError,
+    _extract_with_clients,
+    explain_error,
+    is_url,
+    prepare_source,
+)
 
 pytestmark = pytest.mark.skipif(
     subprocess.run(["which", "ffmpeg"], capture_output=True).returncode != 0,
@@ -120,14 +131,124 @@ class TestShiftSegments:
         assert [(s.start, s.end) for s in shifted] == [(0, 10), (100, 110)]
 
 
+class TestChallengeCooldown:
+    def test_second_attempt_is_refused_without_touching_the_network(self, tmp_path):
+        from video_clipper import source as source_module
+
+        cfg = load_config(None).with_overrides(cache_dir=tmp_path / "cache")
+        until = source_module.note_challenge(600)
+        calls = []
+
+        def downloader(url, opts):
+            calls.append(1)
+            return {}
+
+        with pytest.raises(ChallengeCooldown) as excinfo:
+            prepare_source("https://youtu.be/x", cfg, segments=[(0, 10)], downloader=downloader)
+        assert calls == [], "во время паузы запросов к сайту быть не должно"
+        assert excinfo.value.until == until
+        assert "Следующая попытка" in str(excinfo.value)
+        source_module.clear_challenge()
+
+    def test_cooldown_expires(self, tmp_path):
+        from video_clipper import source as source_module
+
+        cfg = load_config(None).with_overrides(cache_dir=tmp_path / "cache")
+        source_module.note_challenge(0.01)
+        time.sleep(0.05)
+        assert source_module.challenge_until() < time.time()
+        source_module.clear_challenge()
+
+
+class TestClientFallback:
+    def test_android_is_tried_first(self):
+        calls = []
+
+        def extractor(url, opts):
+            client = (opts.get("extractor_args") or {}).get("youtube", {}).get("player_client")
+            calls.append(client)
+            return {"title": "ок", "duration": 10}
+
+        info, used = _extract_with_clients(
+            "https://www.youtube.com/watch?v=x", {"quiet": True}, extractor
+        )
+        assert info["title"] == "ок"
+        assert calls == [["android"]], calls
+        assert used["extractor_args"]["youtube"]["player_client"] == ["android"]
+
+    def test_challenge_moves_to_the_next_client(self):
+        calls = []
+
+        def extractor(url, opts):
+            client = (opts.get("extractor_args") or {}).get("youtube", {}).get("player_client")
+            calls.append(client)
+            if client in (["android"], ["tv_embedded"]):
+                raise RuntimeError("The page needs to be reloaded.")
+            return {"title": "ок"}
+
+        info, used = _extract_with_clients("https://youtu.be/x", {}, extractor)
+        assert info["title"] == "ок"
+        assert calls == [["android"], ["tv_embedded"], ["web"]]
+
+    def test_other_errors_are_not_retried(self):
+        calls = []
+
+        def extractor(url, opts):
+            calls.append(1)
+            raise RuntimeError("HTTP Error 404: Not Found")
+
+        with pytest.raises(RuntimeError):
+            _extract_with_clients("https://www.youtube.com/watch?v=x", {}, extractor)
+        assert len(calls) == 1
+
+    def test_non_youtube_is_never_retried(self):
+        calls = []
+
+        def extractor(url, opts):
+            calls.append(1)
+            raise RuntimeError("Sign in to confirm you're not a bot")
+
+        with pytest.raises(RuntimeError):
+            _extract_with_clients("https://vimeo.com/1", {}, extractor)
+        assert len(calls) == 1
+
+
+class TestExplainError:
+    def _cfg(self, tmp_path, age_days=None):
+        path = tmp_path / "c.txt"
+        path.write_text("# Netscape HTTP Cookie File\n", encoding="utf-8")
+        if age_days is not None:
+            stamp = time.time() - age_days * 86400
+            os.utime(path, (stamp, stamp))
+        return load_config(None).with_overrides(cookies=str(path))
+
+    def test_bot_check_with_fresh_cookies_does_not_blame_cookies(self, tmp_path):
+        text = explain_error(RuntimeError("Sign in to confirm you're not a bot"), self._cfg(tmp_path, 0.2))
+        assert "Дело не в cookies" in text
+        assert "повтори запрос" in text.lower()
+
+    def test_bot_check_with_stale_cookies_asks_for_refresh(self, tmp_path):
+        text = explain_error(RuntimeError("Sign in to confirm you're not a bot"), self._cfg(tmp_path, 60))
+        assert "не менялся 60 дн." in text
+
+    def test_bot_check_without_file_says_so(self, tmp_path):
+        cfg = load_config(None).with_overrides(cookies=str(tmp_path / "нет.txt"))
+        assert "файла cookies нет" in explain_error(RuntimeError("not a bot"), cfg)
+
+    def test_ordinary_error_stays_ordinary(self, tmp_path):
+        assert explain_error(RuntimeError("boom"), self._cfg(tmp_path, 1)) == "boom"
+
+
 @pytest.fixture(autouse=True)
 def clear_meta_cache():
     """Metadata caching must not leak between tests (they reuse the same fake URL)."""
     from video_clipper import source as source_module
 
     source_module._META_CACHE.clear()
+    source_module.clear_challenge()
     yield
     source_module._META_CACHE.clear()
+    source_module.clear_challenge()
 
 
 class TestDownload:
@@ -206,7 +327,10 @@ class TestDownload:
         cfg = load_config(None).with_overrides(cache_dir=tmp_path / "cache")
         with pytest.raises(SourceError, match="Полную загрузку не начинаю"):
             prepare_source("https://youtu.be/x", cfg, segments=[(0, 20)], downloader=downloader)
-        assert len(attempts) == 2  # metadata + the failed section attempt, no third try
+        downloads = [opts for opts in attempts if not opts.get("skip_download")]
+        assert downloads, "секционная попытка должна была состояться"
+        assert all("download_ranges" in opts for opts in downloads), "полной загрузки быть не должно"
+        assert len(downloads) == len(YT_CLIENTS) + 1, "каждый клиент пробуется ровно раз"
 
     def test_download_reports_progress(self, sample_video, tmp_path):
         events: list[tuple[str, float | None, str]] = []

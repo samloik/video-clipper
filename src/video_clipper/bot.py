@@ -37,7 +37,7 @@ from typing import Callable
 
 from .config import Config, load_config
 from .segments import Segment, parse_range_spec
-from .source import fetch_metadata, is_url
+from .source import ChallengeCooldown, challenge_until, fetch_metadata, is_bot_check, is_url
 from .storage import describe, sweep
 
 log = logging.getLogger("video_clipper")
@@ -83,7 +83,9 @@ https://youtu.be/ID 0:10-0:20
 ОГРАНИЧЕНИЯ
   Telegram принимает файлы до 50 МБ — больший клип бот не отправит.
   Режется один ролик за раз, следующие ждут в очереди.
-  Файлы живут retention_minutes (обычно 30 минут) после последнего использования."""
+  Файлы живут retention_minutes (обычно 30 минут) после последнего использования.
+  Если YouTube требует подтверждение (бот-чек), бот делает паузу и повторяет
+  запрос сам через 15 минут — отменить повтор можно командой /stop."""
 
 
 HELP = (
@@ -573,6 +575,45 @@ def describe_request(
     return "\n".join(lines)
 
 
+RETRY_DELAY_MINUTES = 15.0
+RETRY_AT: dict[int, float] = {}
+_RETRY_TIMERS: dict[int, threading.Timer] = {}
+
+
+def schedule_retry(
+    bot, cfg: Config, chat_id: int, text: str, delay_minutes: float = RETRY_DELAY_MINUTES
+) -> float:
+    """Repeat the same request later: a YouTube bot-check usually clears by itself."""
+    return schedule_retry_at(bot, cfg, chat_id, text, time.time() + delay_minutes * 60)
+
+
+def schedule_retry_at(bot, cfg: Config, chat_id: int, text: str, due: float) -> float:
+    """Same as :func:`schedule_retry`, but at an explicit timestamp."""
+    cancel_retry(chat_id)
+    RETRY_AT[chat_id] = due
+
+    def _fire() -> None:
+        RETRY_AT.pop(chat_id, None)
+        _RETRY_TIMERS.pop(chat_id, None)
+        run_in_worker(handle_message, bot, cfg, {"chat": {"id": chat_id}, "text": text})
+
+    timer = threading.Timer(max(1.0, due - time.time()), _fire)
+    timer.daemon = True
+    _RETRY_TIMERS[chat_id] = timer
+    timer.start()
+    return due
+
+
+def cancel_retry(chat_id: int) -> bool:
+    """Drop a pending retry (used by /stop and /new)."""
+    RETRY_AT.pop(chat_id, None)
+    timer = _RETRY_TIMERS.pop(chat_id, None)
+    if timer is not None:
+        timer.cancel()
+        return True
+    return False
+
+
 class ProgressReporter:
     """One chat message that is edited as the job advances.
 
@@ -786,11 +827,16 @@ def handle_message(bot, cfg: Config, message: dict, clipper=None) -> None:
             lines.append(f"cookies: обновлены {age:.1f} дн. назад ({cookies})")
         else:
             lines.append("cookies: файла нет — YouTube может требовать авторизацию")
+        if chat_id in RETRY_AT:
+            when = time.strftime("%H:%M", time.localtime(RETRY_AT[chat_id]))
+            lines.append(f"Отложен повтор запроса в {when} (держит бот-чек YouTube)")
         lines.append(f"Удаление через {cfg.retention_minutes} мин тишины")
         bot.send_message(chat_id, "\n".join(lines))
         return
     if command == "/stop":
         stop_current_job(bot, chat_id)
+        if cancel_retry(chat_id):
+            bot.send_message(chat_id, "Отложенный повтор отменил.")
         return
     if command == "/resume":
         request = LAST_REQUESTS.get(chat_id)
@@ -816,6 +862,7 @@ def handle_message(bot, cfg: Config, message: dict, clipper=None) -> None:
         LAST_REQUESTS.pop(chat_id, None)
         JOBS.clear()
         STOP_REQUESTED.clear()
+        cancel_retry(chat_id)
         result = sweep([cfg.cache_dir, Path(cfg.output_dir)], minutes=0)
         bot.send_message(
             chat_id,
@@ -893,6 +940,28 @@ def handle_message(bot, cfg: Config, message: dict, clipper=None) -> None:
             bot.send_message(chat_id, "Остановлено. Повторить — /resume.")
             return
         log.exception("Ошибка нарезки")
+        if isinstance(exc, ChallengeCooldown):
+            reporter.finish("⏸ Пауза из-за бот-чека")
+            due = schedule_retry_at(bot, cfg, chat_id, text, exc.until)
+            bot.send_message(
+                chat_id,
+                f"{exc}\nПовторю сам в {time.strftime('%H:%M', time.localtime(due))}. "
+                f"Отменить — /stop.",
+            )
+            return
+        if is_bot_check(exc):
+            due = schedule_retry_at(
+                bot, cfg, chat_id, text, max(challenge_until(), time.time() + RETRY_DELAY_MINUTES * 60)
+            )
+            reporter.finish("⏳ YouTube просит подтверждение")
+            bot.send_message(
+                chat_id,
+                f"YouTube потребовал подтверждения, что клиент не бот. Это ограничение "
+                f"этого IP, а не cookies.\n"
+                f"Повторю тот же запрос сам в {time.strftime('%H:%M', time.localtime(due))} — "
+                f"обычно к этому времени проходит. Отменить — /stop.",
+            )
+            return
         reporter.finish("⚠️ Ошибка")
         bot.send_message(chat_id, f"Ошибка: {exc}")
         return

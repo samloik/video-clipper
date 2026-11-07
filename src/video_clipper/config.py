@@ -72,6 +72,9 @@ class Config:
     def with_overrides(self, **kwargs: Any) -> "Config":
         """Return a copy with non-None values applied (CLI flags win over file)."""
         clean = {k: v for k, v in kwargs.items() if v is not None}
+        for key in ("output_dir", "cache_dir"):
+            if key in clean and not isinstance(clean[key], Path):
+                clean[key] = Path(str(clean[key])).expanduser()
         return replace(self, **clean) if clean else self
 
 

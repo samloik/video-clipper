@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import threading
 import time
 from pathlib import Path
 
@@ -20,6 +21,7 @@ from video_clipper.bot import (
 from video_clipper.config import load_config
 from video_clipper.cut import ClipResult
 from video_clipper.segments import Segment
+from video_clipper.source import SourceError
 from video_clipper.storage import describe, find_cached_source, sweep, video_id_from_url
 
 
@@ -32,6 +34,60 @@ def no_metadata_network(monkeypatch):
     monkeypatch.setattr("video_clipper.bot.fetch_metadata", lambda *args, **kwargs: {})
     yield
     source_module._META_CACHE.clear()
+
+
+class TestBotCheckRetry:
+    def test_bot_check_schedules_a_retry_and_says_why(self, tmp_path, monkeypatch):
+        import video_clipper.bot as botmod
+
+        botmod.RETRY_AT.clear()
+        botmod._RETRY_TIMERS.clear()
+
+        def clipper(source, segments, fast, cfg, progress=None):
+            raise SourceError("Не удалось скачать: ERROR: Sign in to confirm you're not a bot")
+
+        bot = FakeBot()
+        handle_message(
+            bot,
+            _cfg(tmp_path),
+            {"chat": {"id": 1}, "text": "https://youtu.be/x 0:00-0:12"},
+            clipper=clipper,
+        )
+        text = "\n".join(t for _, t in bot.messages)
+        assert "Это ограничение" in text and "IP" in text
+        assert "Повторю тот же запрос сам" in text
+        assert 1 in botmod.RETRY_AT, "повтор должен быть запланирован"
+        assert botmod.cancel_retry(1) is True
+
+    def test_stop_cancels_the_pending_retry(self, tmp_path):
+        import video_clipper.bot as botmod
+
+        botmod.RETRY_AT[1] = time.time() + 600
+        timer = threading.Timer(600, lambda: None)
+        timer.daemon = True
+        botmod._RETRY_TIMERS[1] = timer
+        bot = FakeBot()
+        handle_message(bot, _cfg(tmp_path), {"chat": {"id": 1}, "text": "/stop"})
+        assert 1 not in botmod.RETRY_AT
+        assert any("Отложенный повтор отменил" in t for _, t in bot.messages)
+
+    def test_ordinary_error_is_not_retried(self, tmp_path):
+        import video_clipper.bot as botmod
+
+        botmod.RETRY_AT.clear()
+
+        def clipper(source, segments, fast, cfg, progress=None):
+            raise RuntimeError("сеть отвалилась")
+
+        bot = FakeBot()
+        handle_message(
+            bot,
+            _cfg(tmp_path),
+            {"chat": {"id": 1}, "text": "https://youtu.be/x 0:00-0:12"},
+            clipper=clipper,
+        )
+        assert botmod.RETRY_AT == {}
+        assert any("Ошибка:" in t for _, t in bot.messages)
 
 
 class TestProgress:

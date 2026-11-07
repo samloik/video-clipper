@@ -25,6 +25,18 @@ class SourceError(RuntimeError):
     """Raised when the source cannot be used (missing file, failed download)."""
 
 
+class ChallengeCooldown(SourceError):
+    """The site is blocking this IP right now; the request was not even attempted."""
+
+    def __init__(self, until: float):
+        self.until = until
+        when = time.strftime("%H:%M", time.localtime(until))
+        super().__init__(
+            f"YouTube требует подтверждение для этого IP, скачивание не начинал. "
+            f"Следующая попытка — после {when}."
+        )
+
+
 @dataclass
 class Source:
     path: Path
@@ -133,6 +145,8 @@ def fetch_metadata(
     """
     if not is_url(source):
         return {}
+    if time.time() < challenge_until():
+        return {}
     cached = _META_CACHE.get(source)
     if cached and time.time() - cached[0] < ttl:
         return cached[1]
@@ -215,6 +229,9 @@ def _download(
         import yt_dlp  # noqa: F401  # imported lazily so CLI --help works without the dependency
     except ImportError as exc:  # pragma: no cover - dependency is required
         raise SourceError("Не установлен yt-dlp: uv pip install yt-dlp") from exc
+
+    if time.time() < _challenge_until:
+        raise ChallengeCooldown(_challenge_until)
 
     cache_dir = cfg.cache_dir
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -301,7 +318,7 @@ def _download(
     log.info("Скачивание %s (макс. %sp)", url, height)
     try:
         try:
-            info = extract(url, opts)
+            info, opts = _extract_with_clients(url, opts, extract)
         except Exception as exc:
             if not sections:
                 raise
@@ -309,15 +326,15 @@ def _download(
                 # A bot-check will fail the full download too, and a long video
                 # means hundreds of megabytes before the error — stop right here.
                 raise SourceError(
-                    f"Секционная загрузка отклонена сайтом: {exc}.\n\n"
-                    f"Полную загрузку не начинаю — с этой блокировкой она тоже не пройдёт. "
-                    f"Обнови cookies ({cfg.cookies}) или попробуй позже."
+                    f"Секционная загрузка отклонена сайтом. {explain_error(exc, cfg)}\n\n"
+                    f"Полную загрузку не начинаю — с этой блокировкой она тоже не пройдёт."
                 ) from exc
-            if duration > LONG_VIDEO_SECONDS:
+            if duration > FULL_FALLBACK_MAX_SECONDS:
                 raise SourceError(
-                    f"Не удалось взять только участки ({exc}), а полная загрузка "
-                    f"{duration / 60:.0f}-минутного видео через этот прокси не пройдёт. "
-                    f"Повтори запрос позже или обнови cookies."
+                    f"Не удалось взять только участки ({explain_error(exc, cfg)}).\n\n"
+                    f"Полную загрузку {duration / 60:.0f}-минутного ролика не начинаю: это "
+                    f"десятки-сотни мегабайт, а сбой участка обычно означает, что и она "
+                    f"не пройдёт. Повтори запрос через 10–15 минут."
                 ) from exc
             log.warning("Секционная загрузка не удалась (%s) — качаю видео целиком", exc)
             _clear_partials(cfg.cache_dir)
@@ -332,8 +349,16 @@ def _download(
                 bridge.stop()
                 bridge = None
             opts["proxy"] = cfg.proxy
-            info = extract(url, opts)
+            info, opts = _extract_with_clients(url, opts, extract)
+    except SourceError:
+        raise
     except Exception as exc:  # yt-dlp raises its own DownloadError hierarchy
+        if is_bot_check(exc):
+            note_challenge()
+            log.warning(
+                "YouTube отбил запрос — пауза до %s",
+                time.strftime("%H:%M", time.localtime(_challenge_until)),
+            )
         raise SourceError(f"Не удалось скачать {url}: {_with_cookie_hint(exc, cfg)}") from exc
     finally:
         for key, value in saved_env.items():
@@ -360,6 +385,68 @@ def _download(
     )
 
 
+# A bot-check is IP- and volume-driven: hammering it with more requests makes it
+# last longer. After one full failure we wait before touching the site again.
+CHALLENGE_COOLDOWN_SECONDS = 12 * 60
+_challenge_until = 0.0
+
+
+def challenge_until() -> float:
+    """Timestamp until which the site is known to be blocking this IP."""
+    return _challenge_until
+
+
+def note_challenge(seconds: float = CHALLENGE_COOLDOWN_SECONDS) -> float:
+    """Remember that the site challenged us, so the next attempt waits."""
+    global _challenge_until
+    _challenge_until = max(_challenge_until, time.time() + seconds)
+    return _challenge_until
+
+
+def clear_challenge() -> None:
+    global _challenge_until
+    _challenge_until = 0.0
+
+
+def _is_youtube(url: str) -> bool:
+    return "youtube.com" in url or "youtu.be" in url
+
+
+def _extract_with_clients(
+    url: str, opts: dict[str, Any], extract: Callable[[str, dict[str, Any]], dict[str, Any]]
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Run the request, then retry with other player clients when challenged.
+
+    A bot-check depends on the client YouTube thinks we are, so the same request
+    done as ``android`` or ``tv_embedded`` often goes through where ``web`` does
+    not. Only authentication errors are retried — anything else is a real error.
+    """
+    # Measured on this network: the default client and tv_embedded get "page
+    # needs to be reloaded" on section downloads, while android goes through.
+    attempts: list[dict[str, Any]] = []
+    if _is_youtube(url):
+        for client in YT_CLIENTS:
+            variant = dict(opts)
+            args = dict(variant.get("extractor_args") or {})
+            args["youtube"] = {"player_client": [client]}
+            variant["extractor_args"] = args
+            attempts.append(variant)
+    attempts.append(opts)
+
+    last: Exception | None = None
+    for variant in attempts:
+        try:
+            return extract(url, variant), variant
+        except Exception as exc:
+            last = exc
+            if not _is_auth_error(exc):
+                raise
+            client = (variant.get("extractor_args") or {}).get("youtube", {}).get("player_client")
+            log.info("Бот-чек (клиент %s) — пробую другой клиент", client or "по умолчанию")
+    assert last is not None
+    raise last
+
+
 def _ytdlp_extract(url: str, opts: dict[str, Any]) -> dict[str, Any]:
     import yt_dlp
 
@@ -367,14 +454,28 @@ def _ytdlp_extract(url: str, opts: dict[str, Any]) -> dict[str, Any]:
         return ydl.extract_info(url, download=True)
 
 
-COOKIE_SIGNS = (
+# YouTube's challenge, not a cookie problem: it is IP-based and comes and goes.
+BOT_CHECK_SIGNS = (
     "sign in to confirm",
-    "cookies",
+    "confirm you're not a bot",
+    "confirm you\u2019re not a bot",
     "not a bot",
-    "login required",
-    "private video",
-    "members-only",
+    "this helps protect our community",
+    "page needs to be reloaded",
 )
+# Genuine authentication problems where refreshing cookies is the fix.
+AUTH_SIGNS = BOT_CHECK_SIGNS + ("login required", "private video", "members-only")
+COOKIE_SIGNS = AUTH_SIGNS  # kept for callers that still use the old name
+
+
+def is_bot_check(exc: BaseException | str) -> bool:
+    """True when the site demanded a bot-check rather than rejecting credentials."""
+    message = (exc if isinstance(exc, str) else str(exc)).lower()
+    return any(sign in message for sign in BOT_CHECK_SIGNS)
+
+
+# Clients that answered on this network; order matters — first one that works wins.
+YT_CLIENTS = ("android", "tv_embedded", "web")
 
 
 def cookies_path(cfg: Config) -> Path | None:
@@ -395,21 +496,47 @@ def cookie_warning(cfg: Config) -> None:
         )
 
 
-def _with_cookie_hint(exc: Exception, cfg: Config) -> str:
+COOKIE_STALE_DAYS = 30
+
+
+def explain_error(exc: Exception, cfg: Config) -> str:
+    """Name the real cause. A bot-check is not the same thing as stale cookies."""
     message = str(exc)
-    lowered = message.lower()
-    if any(sign in lowered for sign in COOKIE_SIGNS):
-        path = cookies_path(cfg)
+    path = cookies_path(cfg)
+    age_days = None
+    if path and path.is_file():
+        age_days = (time.time() - path.stat().st_mtime) / 86400
+
+    if not is_bot_check(exc):
+        if any(sign in message.lower() for sign in ("login required", "members-only", "private video")):
+            return f"{message}\n\nРолик требует входа в аккаунт: обнови cookies в {path}."
+        return message
+
+    if age_days is None:
         return (
-            f"{message}\n\nПохоже, нужны свежие cookies. Экспортируй их из браузера "
-            f"(расширение «Get cookies.txt LOCALLY») и положи в {path}. "
-            f"yt-dlp сам дописывает в этот файл обновлённые cookie, но вход в аккаунт "
-            f"он не восстанавливает."
+            f"{message}\n\nYouTube просит подтвердить, что клиент не бот, а файла cookies нет "
+            f"({path}). Экспортируй их из браузера расширением «Get cookies.txt LOCALLY»."
         )
-    return message
+    if age_days > COOKIE_STALE_DAYS:
+        return (
+            f"{message}\n\nФайл cookies не менялся {age_days:.0f} дн. — обнови его: {path} "
+            f"(«Get cookies.txt LOCALLY»)."
+        )
+    return (
+        f"{message}\n\nДело не в cookies: файл свежий (обновлён {age_days:.1f} дн. назад). "
+        f"YouTube выборочно требует подтверждение для этого IP — повтори запрос через "
+        f"10–15 минут, обычно проходит."
+    )
+
+
+def _with_cookie_hint(exc: Exception, cfg: Config) -> str:
+    """Backwards-compatible name for :func:`explain_error`."""
+    return explain_error(exc, cfg)
 
 
 LONG_VIDEO_SECONDS = 90 * 60
+# Above this length a failed section attempt is not worth a full download.
+FULL_FALLBACK_MAX_SECONDS = 30 * 60
 
 
 def _is_auth_error(exc: Exception) -> bool:
