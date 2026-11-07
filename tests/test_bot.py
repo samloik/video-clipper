@@ -105,6 +105,15 @@ class TestParseRequest:
         assert [(s.start, s.end) for s in req.segments] == [(10.0, 20.0)]
         assert req.fast is False
 
+    def test_range_with_omitted_leading_zero(self):
+        """Exactly the message from the chat: link on one line, 0:00-:20 on the next."""
+        req = parse_request("https://www.youtube.com/watch?v=AAkdEOqCrWI\n0:00-:20")
+        assert [(s.start, s.end) for s in req.segments] == [(0.0, 20.0)]
+
+    def test_short_hand_on_the_left(self):
+        req = parse_request("https://youtu.be/x :20-1:00")
+        assert [(s.start, s.end) for s in req.segments] == [(20.0, 60.0)]
+
     def test_two_ranges(self):
         req = parse_request("https://youtu.be/x 0:01-0:03 1:00-1:10")
         assert len(req.segments) == 2

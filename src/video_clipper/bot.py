@@ -42,8 +42,11 @@ log = logging.getLogger("video_clipper")
 
 API_BASE = "https://api.telegram.org"
 URL_RE = re.compile(r"https?://\S+")
-RANGE_RE = re.compile(r"(\d[\d:]*(?:[.,]\d+)?)\s*(?:-|–|—|\.\.)\s*(\d[\d:]*(?:[.,]\d+)?)")
-TIME_RE = re.compile(r"^\d[\d:]*(?:[.,]\d+)?$")
+# A part may omit its leading zero — ":20" is what people type for 0:20, and the
+# timecode parser accepts it, so the chat parser must accept it too.
+_TC_PART = r"(?:\d[\d:]*(?:[.,]\d+)?|:\d[\d:]*(?:[.,]\d+)?)"
+RANGE_RE = re.compile(rf"({_TC_PART})\s*(?:-|–|—|\.\.)\s*({_TC_PART})")
+TIME_RE = re.compile(rf"^{_TC_PART}$")
 HELP = (
     "Пришли ссылку и таймкоды — вырежу и отправлю ролик.\n\n"
     "Примеры:\n"
