@@ -856,6 +856,24 @@ class TestPreview:
         assert PAGE.count('data-step="1"') == 2
 
 
+class TestMobileHeader:
+    """На телефоне шапка не должна вылезать за экран."""
+
+    def test_narrow_screen_rule_exists(self):
+        from video_clipper.gui import PAGE
+
+        assert "@media (max-width:620px)" in PAGE
+        block = PAGE.split("@media (max-width:620px)")[1].split("@media")[0]
+        assert ".bar{" in block and "flex-wrap:wrap" in block
+        assert ".bar-actions{" in block and "grid-template-columns:repeat(4" in block
+
+    def test_brand_does_not_push_the_buttons_out(self):
+        from video_clipper.gui import PAGE
+
+        block = PAGE.split("@media (max-width:620px)")[1].split("@media")[0]
+        assert "min-width:0" in block and "text-overflow:ellipsis" in block
+
+
 class TestVerticalWindow:
     def test_position_is_remembered_per_source(self, server_factory, cfg, tmp_path):
         base = server_factory(fake_clipper(tmp_path / "c.mp4"))
