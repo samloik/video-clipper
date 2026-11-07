@@ -28,6 +28,25 @@ class TestParseTimecode:
     def test_whitespace(self):
         assert parse_timecode("  1:12  ") == 72.0
 
+    def test_leading_part_omitted(self):
+        """":30" is the usual typo for 0:30, not a reason to refuse the request."""
+        assert parse_timecode(":30") == 30.0
+        assert parse_timecode(":05.5") == 5.5
+
+    def test_trailing_part_omitted(self):
+        """A colon with nothing after it means zero seconds."""
+        assert parse_timecode("1:") == 60.0
+        assert parse_timecode("1:02:") == 3720.0
+
+    def test_middle_part_omitted_is_rejected(self):
+        with pytest.raises(ValueError):
+            parse_timecode("1::30")
+
+    @pytest.mark.parametrize("bad", [":", "::"])
+    def test_only_separators_rejected(self, bad):
+        with pytest.raises(ValueError):
+            parse_timecode(bad)
+
     @pytest.mark.parametrize("bad", ["", "   ", "abc", "1:ab", "1:2:3:4", "!!!", "-5", "--1:00"])
     def test_rejects_garbage(self, bad):
         with pytest.raises(ValueError):

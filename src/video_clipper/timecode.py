@@ -34,6 +34,20 @@ def parse_timecode(value: str | int | float) -> float:
     if len(parts) > 3:
         raise ValueError(f"Некорректный таймкод: {value!r} (ожидается ЧЧ:ММ:СС[.ммм])")
 
+    # Shorthand with an omitted edge part: ":30" means 0:30, "1:" means 1:00.
+    # An omitted middle part ("1::30") stays an error — that is a typo, not a shorthand.
+    if not any(p.strip() for p in parts):
+        raise ValueError(f"Некорректный таймкод: {value!r}")
+    normalized = list(parts)
+    for index, part in enumerate(parts):
+        if part.strip():
+            continue
+        if index in (0, len(parts) - 1):
+            normalized[index] = "0"
+        else:
+            raise ValueError(f"Некорректный таймкод: {value!r}")
+    parts = normalized
+
     try:
         numbers = [float(p) for p in parts]
     except ValueError as exc:

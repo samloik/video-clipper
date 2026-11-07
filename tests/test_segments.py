@@ -28,6 +28,11 @@ class TestParseRangeSpec:
         seg = parse_range_spec("00:00:10.5-00:00:20")
         assert seg.start == 10.5 and seg.end == 20.0
 
+    def test_short_hand_seconds(self):
+        """0:00-:30 from the chat is normalized to 0:00-0:30."""
+        seg = parse_range_spec("0:00-:30")
+        assert (seg.start, seg.end) == (0.0, 30.0)
+
     def test_missing_separator(self):
         with pytest.raises(ValueError, match="НАЧАЛО-КОНЕЦ"):
             parse_range_spec("1:12")

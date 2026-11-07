@@ -390,6 +390,78 @@ class TestWholeVideo:
         assert botmod.JOBS, "задание должно быть сохранено для кнопок"
 
 
+class TestControls:
+    def test_stop_sets_flag_and_replies(self, tmp_path, monkeypatch):
+        import video_clipper.bot as botmod
+
+        calls = []
+        monkeypatch.setattr(
+            botmod.subprocess,
+            "run",
+            lambda *a, **kw: calls.append(a) or type("R", (), {"returncode": 0})(),
+        )
+        botmod.STOP_REQUESTED.clear()
+        bot = FakeBot()
+        handle_message(bot, _cfg(tmp_path), {"chat": {"id": 1}, "text": "/stop"})
+        assert botmod.STOP_REQUESTED.is_set()
+        assert calls and calls[0][0][0] == "pkill"
+        assert any("Останавливаю" in text for _, text in bot.messages)
+        botmod.STOP_REQUESTED.clear()
+
+    def test_resume_repeats_last_request(self, tmp_path, monkeypatch):
+        import video_clipper.bot as botmod
+
+        seen = []
+
+        def fake_worker(fn, *args):
+            seen.append(args[2]["text"] if len(args) > 2 else "")
+
+        monkeypatch.setattr(botmod, "run_in_worker", fake_worker)
+        botmod.LAST_REQUESTS.clear()
+        botmod.LAST_REQUESTS[1] = botmod.Request(
+            source="https://youtu.be/x", segments=[Segment(10, 20)], fast=True
+        )
+        bot = FakeBot()
+        handle_message(bot, _cfg(tmp_path), {"chat": {"id": 1}, "text": "/resume"})
+        assert seen == ["https://youtu.be/x 10-20 fast"]
+
+    def test_resume_without_request(self, tmp_path):
+        from video_clipper.bot import LAST_REQUESTS
+
+        LAST_REQUESTS.clear()
+        bot = FakeBot()
+        handle_message(bot, _cfg(tmp_path), {"chat": {"id": 1}, "text": "/resume"})
+        assert any("Нечего повторять" in text for _, text in bot.messages)
+
+    def test_new_clears_state_and_files(self, tmp_path):
+        import video_clipper.bot as botmod
+
+        cfg = _cfg(tmp_path)
+        cfg.cache_dir.mkdir(parents=True, exist_ok=True)
+        (cfg.cache_dir / "a.mp4").write_bytes(b"1")
+        botmod.LAST_REQUESTS[1] = botmod.Request(source="u", segments=[Segment(1, 2)])
+        botmod.JOBS["k"] = {"path": "x"}
+        bot = FakeBot()
+        handle_message(bot, cfg, {"chat": {"id": 1}, "text": "/new"})
+        assert 1 not in botmod.LAST_REQUESTS
+        assert botmod.JOBS == {}
+        assert not (cfg.cache_dir / "a.mp4").exists()
+        assert any("чистого листа" in text for _, text in bot.messages)
+
+    def test_whole_video_request_is_remembered_for_resume(self, tmp_path):
+        import video_clipper.bot as botmod
+
+        botmod.LAST_REQUESTS.clear()
+        handle_message(
+            bot := FakeBot(),
+            _cfg(tmp_path),
+            {"chat": {"id": 1}, "text": "https://youtu.be/x"},
+            clipper=make_clipper(tmp_path),
+        )
+        assert botmod.LAST_REQUESTS[1].source == "https://youtu.be/x"
+        assert botmod.LAST_REQUESTS[1].segments == []
+
+
 class TestHandleMessage:
     def test_sends_video(self, tmp_path):
         bot = FakeBot()

@@ -66,6 +66,7 @@ def prepare_source(
     segments: list[tuple[float, float]] | None = None,
     keep_source: bool = False,
     downloader: Callable[[str, dict[str, Any]], dict[str, Any]] | None = None,
+    cancel_event: Any = None,
 ) -> Source:
     """Return a usable local file for ``source``.
 
@@ -93,7 +94,7 @@ def prepare_source(
             url=source,
         )
 
-    return _download(source, cfg, segments or [], keep_source, downloader)
+    return _download(source, cfg, segments or [], keep_source, downloader, cancel_event)
 
 
 SECTION_COVERAGE = 0.4
@@ -119,6 +120,7 @@ def _download(
     segments: list[tuple[float, float]],
     keep_source: bool,
     downloader: Callable[[str, dict[str, Any]], dict[str, Any]] | None,
+    cancel_event: Any = None,
 ) -> Source:
     try:
         import yt_dlp  # noqa: F401  # imported lazily so CLI --help works without the dependency
@@ -146,6 +148,13 @@ def _download(
         "retries": 3,
         "socket_timeout": 30,
     }
+    if cancel_event is not None:
+        # yt-dlp calls the hook while downloading: raising aborts the transfer.
+        def _hook(_progress: dict[str, Any]) -> None:
+            if cancel_event.is_set():
+                raise RuntimeError("остановлено пользователем")
+
+        opts["progress_hooks"] = [_hook]
     if cfg.proxy:
         opts["proxy"] = cfg.proxy
     if cfg.cookies:

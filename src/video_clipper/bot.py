@@ -23,7 +23,9 @@ import http.client
 import json
 import logging
 import mimetypes
+import os
 import re
+import subprocess
 import threading
 import time
 import urllib.error
@@ -54,7 +56,8 @@ HELP = (
     "из уже скачанного файла, и «📱 Вертикально 9:16» — кадр под смартфон (можно с размытым фоном).\n"
     "Словом тоже можно: «вертикально», «9:16», «шортс», а «размытый фон» — фон вместо обрезки.\n"
     "Пришли только ссылку без таймкодов — отдам ролик целиком (большие файлы сожму до 45 МБ).\n\n"
-    "/status — что лежит на машине, /clean — удалить всё сейчас.\n"
+    "/stop — остановить текущую нарезку, /resume — повторить последний запрос.\n"
+    "/new — начать с чистого листа, /clean — только удалить файлы, /status — что на машине.\n"
     f"Файлы удаляются автоматически через {{minutes}} мин тишины."
 )
 
@@ -206,6 +209,17 @@ class Telegram:
 # job key -> what is needed to re-cut without touching the network again
 JOBS: dict[str, dict] = {}
 
+# chat_id -> last request, so /resume can repeat it
+LAST_REQUESTS: dict[int, "Request"] = {}
+
+# /stop raises this; ffmpeg children of the bot are killed, downloads abort via
+# yt-dlp progress hooks
+STOP_REQUESTED = threading.Event()
+
+
+class JobCancelled(RuntimeError):
+    """Raised when the user asked to stop the running job."""
+
 # Telegram polling must never wait for ffmpeg: one heavy job at a time runs in a
 # background thread, so buttons and messages keep being accepted meanwhile.
 WORK_SLOT = threading.Semaphore(1)
@@ -292,7 +306,13 @@ def clip_for_bot(
     from .segments import clip_filename, validate_segments
     from .source import prepare_source, shift_segments
 
-    src = prepare_source(source, cfg, segments=[(s.start, s.end) for s in segments], keep_source=True)
+    src = prepare_source(
+        source,
+        cfg,
+        segments=[(s.start, s.end) for s in segments],
+        keep_source=True,
+        cancel_event=STOP_REQUESTED,
+    )
     whole = not segments
     if whole:
         if src.info.duration <= 0:
@@ -331,6 +351,8 @@ def clip_for_bot(
 
     results = []
     for i, seg in enumerate(shifted):
+        if STOP_REQUESTED.is_set():
+            raise JobCancelled("остановлено пользователем")
         shown = segments[i] if i < len(segments) else seg
         result = cut_segment(
             str(src.path),
@@ -413,6 +435,31 @@ def split_long(text: str, limit: int = 3800) -> list[str]:
     return parts
 
 
+def stop_current_job(bot, chat_id: int) -> None:
+    """Kill the running encoder / abort the download and report it."""
+    STOP_REQUESTED.set()
+    killed = 0
+    try:
+        # ffmpeg is a child of this process; yt-dlp aborts itself via the
+        # progress hook that watches STOP_REQUESTED.
+        result = subprocess.run(
+            ["pkill", "-P", str(os.getpid()), "-f", "ffmpeg"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        killed = 0 if result.returncode != 0 else 1
+    except (OSError, subprocess.SubprocessError):  # pragma: no cover - env specific
+        pass
+    log.info("Остановка задания по /stop (ffmpeg: %s)", "убит" if killed else "не запущен")
+    bot.send_message(
+        chat_id,
+        "Останавливаю: кодирование прервано, загрузка оборвётся на ближайшем шаге. "
+        "Повторить потом — /resume.",
+    )
+
+
 def handle_message(bot, cfg: Config, message: dict, clipper=None) -> None:
     """One incoming message → reply, clips, cleanup."""
     chat_id = int(message.get("chat", {}).get("id", 0))
@@ -450,6 +497,40 @@ def handle_message(bot, cfg: Config, message: dict, clipper=None) -> None:
         lines.append(f"Удаление через {cfg.retention_minutes} мин тишины")
         bot.send_message(chat_id, "\n".join(lines))
         return
+    if command == "/stop":
+        stop_current_job(bot, chat_id)
+        return
+    if command == "/resume":
+        request = LAST_REQUESTS.get(chat_id)
+        if request is None:
+            bot.send_message(chat_id, "Нечего повторять — пришли ссылку и таймкоды.")
+            return
+        bot.send_message(chat_id, "Повторяю последний запрос...")
+        STOP_REQUESTED.clear()
+        tail = " ".join(f"{s.start:.0f}-{s.end:.0f}" for s in request.segments)
+        flags = " ".join(
+            flag
+            for flag, enabled in (
+                ("fast", request.fast),
+                ("вертикально", request.vertical),
+                ("размытый фон", request.layout == "blur"),
+            )
+            if enabled
+        )
+        text = " ".join(part for part in (request.source, tail, flags) if part)
+        run_in_worker(handle_message, bot, cfg, {"chat": {"id": chat_id}, "text": text})
+        return
+    if command == "/new":
+        LAST_REQUESTS.pop(chat_id, None)
+        JOBS.clear()
+        STOP_REQUESTED.clear()
+        result = sweep([cfg.cache_dir, Path(cfg.output_dir)], minutes=0)
+        bot.send_message(
+            chat_id,
+            f"Начали с чистого листа: забыл последний запрос, удалил {result.count} файл(ов) "
+            f"({result.freed_bytes / 1048576:.1f} МБ).",
+        )
+        return
     if command == "/clean":
         JOBS.clear()
         result = sweep([cfg.cache_dir, Path(cfg.output_dir)], minutes=0)
@@ -465,10 +546,13 @@ def handle_message(bot, cfg: Config, message: dict, clipper=None) -> None:
     if not request.segments:
         bot.send_message(chat_id, "Таймкодов нет — пришлю ролик целиком.")
 
+    LAST_REQUESTS[chat_id] = request
+    STOP_REQUESTED.clear()
     if request.segments:
         bot.send_message(
             chat_id,
-            f"Принял: {len(request.segments)} отрезок(ов), режим {'fast' if request.fast else 'точный'}. Режу...",
+            f"Принял: {len(request.segments)} отрезок(ов), "
+            f"режим {'fast' if request.fast else 'точный'}. Режу...",
         )
     else:
         bot.send_message(chat_id, "Качаю ролик целиком, это может занять пару минут...")
@@ -487,7 +571,13 @@ def handle_message(bot, cfg: Config, message: dict, clipper=None) -> None:
                 vertical=request.vertical,
                 layout=request.layout,
             )
+    except JobCancelled:
+        bot.send_message(chat_id, "Остановлено. Повторить — /resume.")
+        return
     except Exception as exc:  # noqa: BLE001 — the chat is the error channel
+        if STOP_REQUESTED.is_set():
+            bot.send_message(chat_id, "Остановлено. Повторить — /resume.")
+            return
         log.exception("Ошибка нарезки")
         bot.send_message(chat_id, f"Ошибка: {exc}")
         return
