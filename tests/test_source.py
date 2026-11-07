@@ -169,7 +169,8 @@ class TestChallengeCooldown:
 
 
 class TestClientFallback:
-    def test_android_is_tried_first(self):
+    def test_mweb_is_tried_first(self):
+        """На этой сети только mweb не получает бот-чек и «page needs to be reloaded»."""
         calls = []
 
         def extractor(url, opts):
@@ -181,8 +182,8 @@ class TestClientFallback:
             "https://www.youtube.com/watch?v=x", {"quiet": True}, extractor
         )
         assert info["title"] == "ок"
-        assert calls == [["android"]], calls
-        assert used["extractor_args"]["youtube"]["player_client"] == ["android"]
+        assert calls == [["mweb"]], calls
+        assert used["extractor_args"]["youtube"]["player_client"] == ["mweb"]
 
     def test_challenge_moves_to_the_next_client(self):
         calls = []
@@ -190,13 +191,31 @@ class TestClientFallback:
         def extractor(url, opts):
             client = (opts.get("extractor_args") or {}).get("youtube", {}).get("player_client")
             calls.append(client)
-            if client in (["android"], ["tv_embedded"]):
+            if client in (["mweb"], ["android_vr"]):
                 raise RuntimeError("The page needs to be reloaded.")
             return {"title": "ок"}
 
         info, used = _extract_with_clients("https://youtu.be/x", {}, extractor)
         assert info["title"] == "ок"
-        assert calls == [["android"], ["tv_embedded"], ["web"]]
+        assert calls == [["mweb"], ["android_vr"], ["ios"]], "следующий клиент по порядку"
+
+    def test_missing_format_falls_back_to_the_best_available(self):
+        """mweb отдаёт только 360p: «до 720p» у него нет — берём что есть."""
+        calls = []
+
+        def extractor(url, opts):
+            client = (opts.get("extractor_args") or {}).get("youtube", {}).get("player_client")
+            calls.append((client, opts.get("format")))
+            if opts.get("format"):
+                raise RuntimeError("ERROR: [youtube] X: Requested format is not available")
+            return {"duration": 10, "title": "360p"}
+
+        info, used = _extract_with_clients(
+            "https://youtu.be/x", {"format": "bv*[height<=720]+ba/b"}, extractor
+        )
+        assert info["title"] == "360p"
+        assert calls[0] == (["mweb"], "bv*[height<=720]+ba/b")
+        assert calls[1] == (["mweb"], None), "второй заход — тот же клиент без формата"
 
     def test_other_errors_are_not_retried(self):
         calls = []
@@ -393,7 +412,8 @@ class TestDownload:
         downloads = [opts for opts in attempts if not opts.get("skip_download")]
         assert downloads, "секционная попытка должна была состояться"
         assert all("download_ranges" in opts for opts in downloads), "полной загрузки быть не должно"
-        assert len(downloads) == len(YT_CLIENTS) + 1, "каждый клиент пробуется ровно раз"
+        # на клиента два захода (с форматом и без), плюс один заход по умолчанию
+        assert len(downloads) == len(YT_CLIENTS) * 2 + 1, "каждый клиент пробуется по разу"
 
     def test_download_reports_progress(self, sample_video, tmp_path):
         events: list[tuple[str, float | None, str]] = []

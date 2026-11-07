@@ -279,10 +279,11 @@ def _stream_info_locked(source: str, cfg: Config) -> tuple[str, dict]:
         "socket_timeout": 10,
     }
     # Один клиент за попытку. Перебор клиентов подряд злит YouTube: каждый лишний
-    # запрос повышает шанс бот-чека, поэтому android, затем (с паузой) mweb.
+    # запрос повышает шанс бот-чека. mweb — единственный, который на этой сети
+    # не получает ни бот-чек, ни «page needs to be reloaded»; android — запасной.
     info: dict = {}
     last_error: Exception | None = None
-    for index, client in enumerate(("android", "mweb")):
+    for index, client in enumerate(("mweb", "android")):
         # У части клиентов нет форматов ниже 480p — тогда просим «лучший доступный»,
         # иначе yt-dlp отвечает «Requested format is not available» и кадра нет
         for fmt in (STREAM_FORMAT, None):

@@ -163,7 +163,13 @@ def fetch_metadata(
         return cached[1]
     try:
         extract = downloader or _ytdlp_extract
-        meta = extract(source, {**_base_opts(cfg), "skip_download": True}) or {}
+        opts = {**_base_opts(cfg), "skip_download": True}
+        if _is_youtube(source):
+            # метаданные тоже зависят от клиента: default/web получают
+            # «page needs to be reloaded», mweb отдаёт длительность
+            meta, _ = _extract_with_clients(source, opts, extract)
+        else:
+            meta = extract(source, opts) or {}
     except Exception as exc:  # metadata is best-effort, never fatal here
         log.info("Метаданные недоступны (%s): %s", source, exc)
         return {}
@@ -381,7 +387,11 @@ def _download(
         if meta.get("duration"):
             break
         try:
-            meta = extract(url, {**opts, "skip_download": True}) or {}
+            meta_opts = {**opts, "skip_download": True}
+            if _is_youtube(url):
+                meta, _ = _extract_with_clients(url, meta_opts, extract)
+            else:
+                meta = extract(url, meta_opts) or {}
             if meta.get("duration"):
                 _META_CACHE[url] = (time.time(), meta)
                 break
@@ -430,6 +440,11 @@ def _download(
                 stale.unlink(missing_ok=True)
         opts["outtmpl"] = str(sections_dir / "%(title).60s-%(id)s.%(ext)s")
         opts["proxy"] = bridge_url
+        # Для участков yt-dlp режет один файл: склейка «видео+звук» тут невозможна,
+        # иначе «Requested format is not available». Поэтому просим одиночный
+        # прогрессивный поток, ближайший к нужной высоте.
+        opts["format"] = f"b[height<={height}]/b"
+        opts.pop("merge_output_format", None)
         opts["download_ranges"] = _build_download_ranges(segments)
         opts["force_keyframes_at_cuts"] = True
         log.info(
@@ -553,16 +568,24 @@ def _extract_with_clients(
     done as ``android`` or ``tv_embedded`` often goes through where ``web`` does
     not. Only authentication errors are retried — anything else is a real error.
     """
-    # Measured on this network: the default client and tv_embedded get "page
-    # needs to be reloaded" on section downloads, while android goes through.
+    # Измерено на этой сети (см. матрицу клиентов в тестах): mweb отдаёт
+    # метаданные и участки, тогда как android получает бот-чек, а tv_embedded,
+    # web и default — «The page needs to be reloaded». Порядок = вероятность успеха.
     attempts: list[dict[str, Any]] = []
     if _is_youtube(url):
         for client in YT_CLIENTS:
-            variant = dict(opts)
-            args = dict(variant.get("extractor_args") or {})
-            args["youtube"] = {"player_client": [client]}
-            variant["extractor_args"] = args
-            attempts.append(variant)
+            # mweb отдаёт только прогрессивный 360p (itag 18): просить у него
+            # «до 720p» бессмысленно — сначала заявленный формат, потом лучший из
+            # доступных у этого же клиента
+            for requested in (opts.get("format"), None):
+                variant = dict(opts)
+                if requested is None:
+                    variant.pop("format", None)
+                args = dict(variant.get("extractor_args") or {})
+                args["youtube"] = {"player_client": [client]}
+                variant["extractor_args"] = args
+                if variant not in attempts:
+                    attempts.append(variant)
     attempts.append(opts)
 
     last: Exception | None = None
@@ -571,12 +594,25 @@ def _extract_with_clients(
             return extract(url, variant), variant
         except Exception as exc:
             last = exc
+            if _is_format_error(exc):
+                log.info("Формат недоступен у клиента %s — прошу лучший доступный",
+                         _client_of(variant))
+                continue
             if not _is_auth_error(exc):
                 raise
             client = (variant.get("extractor_args") or {}).get("youtube", {}).get("player_client")
             log.info("Бот-чек (клиент %s) — пробую другой клиент", client or "по умолчанию")
     assert last is not None
     raise last
+
+
+def _is_format_error(exc: BaseException) -> bool:
+    return "requested format is not available" in str(exc).lower()
+
+
+def _client_of(opts: dict[str, Any]) -> str:
+    args = (opts.get("extractor_args") or {}).get("youtube") or {}
+    return ",".join(args.get("player_client") or []) or "по умолчанию"
 
 
 def _ytdlp_extract(url: str, opts: dict[str, Any]) -> dict[str, Any]:
@@ -607,7 +643,7 @@ def is_bot_check(exc: BaseException | str) -> bool:
 
 
 # Clients that answered on this network; order matters — first one that works wins.
-YT_CLIENTS = ("android", "tv_embedded", "web")
+YT_CLIENTS = ("mweb", "android_vr", "ios", "tv", "android")
 
 
 def cookies_path(cfg: Config) -> Path | None:
