@@ -111,10 +111,15 @@ def link_problem(source: str) -> str:
         if not match:
             continue
         found = match.group(1)
-        if len(found) != 11:
+        if len(found) < 11:
             return (
                 f"в ссылке {len(found)} символов id вместо 11 — она скопирована не целиком. "
                 "Скопируй адрес заново: https://youtu.be/XXXXXXXXXXX"
+            )
+        if len(found) > 11:
+            return (
+                f"в ссылке {len(found)} символов id вместо 11 — к адресу приклеился лишний "
+                f"символ. Нужны ровно 11: https://youtu.be/{found[:11]}"
             )
         return ""
     return ""

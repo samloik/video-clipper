@@ -174,6 +174,26 @@ class TestPreviewWindow:
         assert end <= 29.8 and start < end
 
 
+class TestLinkProblem:
+    def test_short_id_is_named_as_truncated(self):
+        from video_clipper.preview import link_problem
+
+        assert "10 символов" in link_problem("https://youtu.be/ABCDEFGHIJ")
+
+    def test_long_id_is_named_as_extra_character(self):
+        from video_clipper.preview import link_problem
+
+        problem = link_problem("https://www.youtube.com/shorts/KhPr0wIt81EA")
+        assert "12 символов" in problem
+        assert "приклеился лишний" in problem
+        assert "https://youtu.be/KhPr0wIt81E" in problem
+
+    def test_correct_id_passes(self):
+        from video_clipper.preview import link_problem
+
+        assert link_problem("https://www.youtube.com/watch?v=-QQSyL7tnqs") == ""
+
+
 class TestStream:
     """Кадр по ссылке без скачивания: берём прямую ссылку на поток."""
 

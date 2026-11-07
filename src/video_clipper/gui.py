@@ -729,9 +729,18 @@ function renderEta(job) {
           ' – ' + fmtSeconds(totalHigh);
       }
     } else {
-      etaEl.textContent = job.stage === 'download'
-        ? 'оценку посчитаю, когда узнаю длительность ролика'
-        : 'оценка недоступна';
+      // Оценки нет (например, конец «до конца» узнали поздно) — считаем остаток
+      // по фактическому прогрессу: за 24 с сделано 75% → осталось ~8 с
+      const done = typeof job.fraction === 'number' ? job.fraction : 0;
+      const elapsed = (Date.now() - startedAt) / 1000;
+      if (done > 0.05 && elapsed > 3) {
+        etaEl.textContent = 'осталось примерно ' +
+          fmtSeconds(elapsed * (1 - done) / done) + ' (по прогрессу)';
+      } else {
+        etaEl.textContent = job.stage === 'download'
+          ? 'оценку посчитаю, когда узнаю длительность ролика'
+          : 'считаю по ходу дела…';
+      }
     }
     return;
   }
@@ -1918,6 +1927,12 @@ def _run_job(
         except Exception as exc:  # noqa: BLE001 — метаданные могут молчать
             # Не фатально: настоящую длительность даст скачанный файл.
             log.info("Длительность заранее неизвестна (%s), конец определю после скачивания", exc)
+        if has_open_ends(segments):
+            # Метаданные сайта промолчали (бот-чек, Shorts), но длительность уже
+            # знает поток — он же давал кадры. Иначе пропадает оценка времени.
+            duration = float(cached_stream(source).get("duration") or 0.0)
+            if duration > 0:
+                segments = resolve_open_ends(segments, duration)
         estimate = _estimate(source, segments, fast, vertical, layout)
         _job_update(
             job_id,

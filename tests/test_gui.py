@@ -446,6 +446,54 @@ class TestOpenEnd:
         assert seen["open_ends"] == [True]
 
 
+class TestEtaWithoutEstimate:
+    """Без готовой оценки остаток считается по фактическому прогрессу."""
+
+    def test_page_counts_the_rest_from_progress(self):
+        from video_clipper.gui import PAGE
+
+        assert "elapsed * (1 - done) / done" in PAGE
+        assert "(по прогрессу)" in PAGE
+        assert "оценка недоступна" not in PAGE
+
+
+class TestEstimateWithOpenEnd:
+    """«До конца» + молчащие метаданные: длительность берём из потока."""
+
+    def test_duration_comes_from_the_stream_cache(self, server_factory, cfg, monkeypatch):
+        from video_clipper.source import SourceError
+
+        monkeypatch.setattr(
+            "video_clipper.source.fetch_metadata",
+            lambda *a, **k: (_ for _ in ()).throw(SourceError("бот-чек")),
+        )
+        monkeypatch.setattr("video_clipper.gui.cached_stream", lambda source: {"duration": 45.0})
+        seen = {}
+
+        def clipper(source, segments, fast, cfg, progress=None, vertical=False, layout="crop"):
+            from video_clipper.segments import is_open_end
+
+            seen["end"] = segments[0].end
+            seen["open"] = is_open_end(segments[0])
+            return []
+
+        base = server_factory(clipper)
+        status, body = post_json(
+            base, "/api/clip",
+            {"source": "https://www.youtube.com/shorts/KhPr0wIt81EA", "start": "0:00", "end": "*"},
+        )
+        assert status == 202
+        for _ in range(100):
+            job = json.loads(get(base, f"/api/jobs/{body['job_id']}")[1])
+            if job["state"] != "running":
+                break
+            time.sleep(0.05)
+        assert seen["open"] is False, "конец должен стать реальной длительностью"
+        assert seen["end"] == pytest.approx(45.0)
+        assert isinstance(job.get("estimate"), list) and len(job["estimate"]) == 2, \
+            "оценка времени должна появиться, а не «оценка недоступна»"
+
+
 class TestErrorDetails:
     def test_job_error_carries_the_request(self, server_factory, tmp_path):
         def clipper(*args, **kwargs):
