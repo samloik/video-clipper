@@ -778,8 +778,18 @@ class TestPreview:
         from video_clipper.gui import PAGE
 
         for marker in ('id="preview"', 'id="thumb-start"', 'id="thumb-end"',
-                       'id="play-seg"', 'id="frame-fwd"', "/api/frame", "/api/media"):
+                       'id="play-seg"', "/api/frame", "/api/media"):
             assert marker in PAGE, marker
+
+    def test_each_boundary_has_its_own_stepper(self):
+        from video_clipper.gui import PAGE
+
+        assert 'data-field="start"' in PAGE and 'data-field="end"' in PAGE
+        # четыре кнопки у каждого края: −1 с, − кадр, + кадр, +1 с
+        assert PAGE.count('data-step="-frame"') == 2
+        assert PAGE.count('data-step="frame"') == 2
+        assert PAGE.count('data-step="-1"') == 2
+        assert PAGE.count('data-step="1"') == 2
 
 
 class TestVerticalWindow:

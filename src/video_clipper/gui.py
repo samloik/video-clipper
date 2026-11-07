@@ -323,6 +323,11 @@ input::placeholder{color:#78818e}
   background:#0b0d10;border:1px solid var(--line);display:block}
 .preview figcaption{font-size:11px;color:var(--ink-3)}
 .preview figcaption b{color:var(--ink-2);font-weight:500}
+.preview .stepper{display:flex;gap:4px;margin-top:2px}
+.preview .stepper button{flex:1;min-height:24px;padding:1px 4px;font-size:10.5px;
+  border-radius:6px;border:1px solid var(--line);background:transparent;color:var(--ink-2);
+  cursor:pointer;font-family:var(--sans);white-space:nowrap}
+.preview .stepper button:hover{border-color:var(--accent);color:var(--accent)}
 .preview-bar{display:flex;flex-wrap:wrap;gap:6px}
 .preview-bar .ghost{min-height:26px;padding:2px 8px;font-size:11px;border-radius:6px}
 .preview-bar .play{margin-left:auto;min-height:26px;padding:2px 10px;font-size:11.5px;
@@ -514,17 +519,25 @@ input::placeholder{color:#78818e}
           <figure>
             <img id="thumb-start" alt="кадр в начале отрезка">
             <figcaption>начало <b id="cap-start" class="mono">0:00</b></figcaption>
+            <div class="stepper" data-field="start">
+              <button type="button" data-step="-1" title="начало на секунду раньше">−1 с</button>
+              <button type="button" data-step="-frame" title="начало на кадр раньше">− кадр</button>
+              <button type="button" data-step="frame" title="начало на кадр позже">+ кадр</button>
+              <button type="button" data-step="1" title="начало на секунду позже">+1 с</button>
+            </div>
           </figure>
           <figure>
             <img id="thumb-end" alt="кадр в конце отрезка">
             <figcaption>конец <b id="cap-end" class="mono">0:30</b></figcaption>
+            <div class="stepper" data-field="end">
+              <button type="button" data-step="-1" title="конец на секунду раньше">−1 с</button>
+              <button type="button" data-step="-frame" title="конец на кадр раньше">− кадр</button>
+              <button type="button" data-step="frame" title="конец на кадр позже">+ кадр</button>
+              <button type="button" data-step="1" title="конец на секунду позже">+1 с</button>
+            </div>
           </figure>
         </div>
         <div class="preview-bar">
-          <button type="button" class="ghost" id="step-back" title="на секунду назад">−1 с</button>
-          <button type="button" class="ghost" id="frame-back" title="на кадр назад">− кадр</button>
-          <button type="button" class="ghost" id="frame-fwd" title="на кадр вперёд">+ кадр</button>
-          <button type="button" class="ghost" id="step-fwd" title="на секунду вперёд">+1 с</button>
           <button type="button" class="ghost" id="prep-frames" hidden>скачать 20 с</button>
           <button type="button" class="play" id="play-seg">▶ посмотреть отрезок</button>
         </div>
@@ -1039,12 +1052,9 @@ function syncPreset() {
 syncPreset();
 
 const previewEl = $('preview'), playerEl = $('player'), previewNoteEl = $('preview-note');
-let mediaInfo = null, activeField = 'start', previewTimer = null;
+let mediaInfo = null, previewTimer = null;
 
-function activeInput() { return activeField === 'end' ? $('end') : $('start'); }
-['start', 'end'].forEach(id => {
-  $(id).addEventListener('focus', () => { activeField = id; });
-});
+function frameStep() { return mediaInfo && mediaInfo.fps ? 1 / mediaInfo.fps : 0.04; }
 
 function fmtTC(seconds) {
   const s = Math.max(0, seconds);
@@ -1196,22 +1206,43 @@ urlEl.addEventListener('input', schedulePreview);
 [$('start'), $('end')].forEach(el => el.addEventListener('input', schedulePreview));
 urlEl.addEventListener('blur', schedulePreview);
 
-function stepField(delta) {
-  const input = activeInput();
+function stepField(field, delta) {
+  const input = field === 'end' ? $('end') : $('start');
   const raw = input.value.trim();
-  if (raw === '*') return;
-  const base = toSeconds(raw || '0');
+  let base = raw === '*' ? 0 : toSeconds(raw || '0');
   if (!Number.isFinite(base)) return;
-  input.value = fmtTC(Math.max(0, base + delta));
+  if (raw === '*') {
+    // «до конца» шагать не от чего: подставляем длительность ролика, если она известна
+    if (field !== 'end' || !(mediaInfo && mediaInfo.duration)) {
+      setStatus('Конец стоит «до конца» — впиши точное время, тогда шаг сработает', 'err');
+      return;
+    }
+    base = mediaInfo.duration;
+  }
+  let next = Math.max(0, base + delta);
+  const startSec = toSeconds($('start').value.trim() || '0');
+  if (field === 'end' && next <= startSec) {
+    next = startSec + Math.abs(delta) || startSec + frameStep();
+    setStatus('Конец раньше начала не бывает — поставил ' + fmtTC(next), 'err');
+  }
+  input.value = fmtTC(next);
   syncPreset();
   schedulePreview();
-  setStatus('Правлю ' + (activeField === 'end' ? 'конец' : 'начало') + ': ' + input.value);
+  setStatus('Правлю ' + (field === 'end' ? 'конец' : 'начало') + ': ' + input.value);
 }
 
-$('step-back').addEventListener('click', () => stepField(-1));
-$('step-fwd').addEventListener('click', () => stepField(1));
-$('frame-back').addEventListener('click', () => stepField(-(mediaInfo && mediaInfo.fps ? 1 / mediaInfo.fps : 0.04)));
-$('frame-fwd').addEventListener('click', () => stepField(mediaInfo && mediaInfo.fps ? 1 / mediaInfo.fps : 0.04));
+document.querySelectorAll('.preview .stepper').forEach(box => {
+  const field = box.dataset.field;
+  box.querySelectorAll('button').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const raw = btn.dataset.step;
+      const delta = raw === 'frame' ? frameStep()
+        : raw === '-frame' ? -frameStep()
+        : Number(raw);
+      stepField(field, delta);
+    });
+  });
+});
 
 $('prep-frames').addEventListener('click', () => {
   const startSec = Math.max(0, toSeconds($('start').value.trim() || '0'));
@@ -1985,8 +2016,9 @@ GUI_HELP = """Как пользоваться
   «без перекодирования» — режет по ключевому кадру: секунды вместо минут, зато начало
      может уехать до ближайшего ключевого кадра.
   Под диапазоном — кадры начала и конца: видно, что попадёт в клип, ещё до нарезки.
-     «± кадр» и «±1 с» двигают границу (шаг кадра берётся из файла), «посмотреть отрезок»
-     проигрывает ровно его — по исходнику, без нарезки.
+     «± кадр» и «±1 с» — свои кнопки под каждым кадром: под началом правят начало,
+     под концом — конец (шаг кадра берётся из файла). «посмотреть отрезок» проигрывает
+     ровно его — по исходнику, без нарезки.
      По ссылке кадры берутся из потока — файл скачивать не нужно; если сайт не отдал
      поток, появится кнопка «скачать 20 с» и кадры возьмутся из короткого участка.
 
