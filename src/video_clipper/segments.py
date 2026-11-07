@@ -138,12 +138,33 @@ def clip_filename(
 
 
 def parse_range_spec(spec: str) -> Segment:
-    """Parse ``START-END`` (e.g. ``1:12-1:45``)."""
+    """Parse one range.
+
+    ``START-END`` is a start and an end (``1:12-1:45``); ``START=LENGTH`` is a
+    start and a duration measured from it (``1:12=0:30`` → 1:12–1:42).
+    """
     raw = spec.strip()
-    if "-" not in raw:
-        raise ValueError(f"Отрезок должен быть в формате НАЧАЛО-КОНЕЦ, получено: {spec!r}")
-    left, right = raw.split("-", 1)
-    return Segment(parse_timecode(left), parse_timecode(right))
+    for separator in ("=", "-"):
+        if separator in raw:
+            left, right = raw.split(separator, 1)
+            start = parse_timecode(left)
+            value = parse_timecode(right)
+            if separator == "=":
+                if value <= 0:
+                    raise ValueError(f"Длительность должна быть больше нуля: {spec!r}")
+                return Segment(start, round(start + value, 3))
+            return Segment(start, value)
+    raise ValueError(
+        f"Отрезок должен быть в формате НАЧАЛО-КОНЕЦ или НАЧАЛО=ДЛИТЕЛЬНОСТЬ, получено: {spec!r}"
+    )
+
+
+def parse_ranges(spec: str) -> list[Segment]:
+    """Parse one or more ranges separated by ``;``."""
+    chunks = [chunk.strip() for chunk in spec.split(";") if chunk.strip()]
+    if not chunks:
+        raise ValueError(f"Пустой список отрезков: {spec!r}")
+    return [parse_range_spec(chunk) for chunk in chunks]
 
 
 def _segments_from_rows(rows: list[dict[str, object]]) -> list[Segment]:
@@ -224,7 +245,9 @@ def build_segments(
     ``allow_empty`` lets the caller ask for the whole video: no segments at all
     means "take everything" instead of an error.
     """
-    segments: list[Segment] = [parse_range_spec(r) for r in (ranges or [])]
+    segments: list[Segment] = []
+    for spec in ranges or []:
+        segments.extend(parse_ranges(spec))
     if csv_path:
         segments.extend(load_csv(csv_path))
     if json_path:

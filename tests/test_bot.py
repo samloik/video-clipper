@@ -114,6 +114,25 @@ class TestParseRequest:
         req = parse_request("https://youtu.be/x :20-1:00")
         assert [(s.start, s.end) for s in req.segments] == [(20.0, 60.0)]
 
+    def test_equals_duration_from_a_link(self):
+        req = parse_request("https://youtu.be/x 1:00=0:30")
+        assert [(s.start, s.end) for s in req.segments] == [(60.0, 90.0)]
+
+    def test_semicolon_several_ranges(self):
+        req = parse_request("https://youtu.be/x\n0:10-0:20; 2:00=45")
+        assert [(s.start, s.end) for s in req.segments] == [(10.0, 20.0), (120.0, 165.0)]
+
+    def test_alternate_separators_from_a_link(self):
+        req = parse_request("https://youtu.be/x 1/12-1,30")
+        assert [(s.start, s.end) for s in req.segments] == [(72.0, 90.0)]
+
+    def test_info_command(self):
+        bot = FakeBot()
+        handle_message(bot, _cfg(Path("/tmp")), {"chat": {"id": 1}, "text": "/info"})
+        memo = "\n".join(text for _, text in bot.messages)
+        for needle in ("начало=длина", "миллисекунды", "0:10-0:20", "/stop", ";  разделитель"):
+            assert needle in memo, needle
+
     def test_two_ranges(self):
         req = parse_request("https://youtu.be/x 0:01-0:03 1:00-1:10")
         assert len(req.segments) == 2

@@ -35,25 +35,63 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .config import Config, load_config
-from .segments import Segment
+from .segments import Segment, parse_range_spec
 from .storage import describe, sweep
 
 log = logging.getLogger("video_clipper")
 
 API_BASE = "https://api.telegram.org"
 URL_RE = re.compile(r"https?://\S+")
-# A part may omit its leading zero — ":20" is what people type for 0:20, and the
-# timecode parser accepts it, so the chat parser must accept it too.
-_TC_PART = r"(?:\d[\d:]*(?:[.,]\d+)?|:\d[\d:]*(?:[.,]\d+)?)"
-RANGE_RE = re.compile(rf"({_TC_PART})\s*(?:-|–|—|\.\.)\s*({_TC_PART})")
-TIME_RE = re.compile(rf"^{_TC_PART}$")
+# Characters a timecode may consist of: digits and any of the component
+# separators the parser understands (":12" is a valid 0:12).
+_TC_CHARS_RE = re.compile(r"^[\d:\\/.,]+$")
+INFO = """Как присылать запрос
+
+Ссылка и таймкоды в одном сообщении — в строку или с новой строки:
+https://youtu.be/ID 0:10-0:20
+
+ЧАСТИ ТАЙМКОДА разделяются любым из символов  :  ,  .  \  /
+  45          -> 0:00:45      одна часть — секунды
+  :12         -> 0:00:12      ведущий ноль можно опустить (но ":45" — это 45 с, а не 3:45)
+  34:43       -> 0:34:43      две части — минуты:секунды
+  1:12  1.12  1/12  1\12  1,12   -> 0:01:12
+  1:02:03     -> 1:02:03      три части — часы:минуты:секунды
+  1:12.500    -> 72.5 с       три цифры после точки/запятой — миллисекунды
+
+ОТРЕЗКИ
+  начало-конец   0:10-0:20          с 10-й по 20-ю секунду
+  начало=длина   1:00=0:30          с 1:00 длиной 30 с, то есть 1:00–1:30
+  несколько      ;  разделитель:  0:10-0:20; 2:00=45; 3:30-3:45
+  можно и парой   0:10 0:20         два таймкода подряд — начало и конец
+
+РЕЖИМЫ — словом в том же сообщении
+  fast / быстро     без перекодирования, границы по ключевым кадрам (в разы быстрее)
+  вертикально       вертикальный кадр 9:16 (обрезает бока)
+  фон / размыт      вертикальный кадр с размытой подложкой
+
+КОМАНДЫ
+  /info     эта памятка
+  /status   что лежит на машине и сколько ему жить
+  /stop     прервать текущую нарезку
+  /resume   повторить последний запрос
+  /new      забыть запрос и удалить файлы
+  /clean    только удалить файлы
+  /id       chat_id для конфига
+
+ОГРАНИЧЕНИЯ
+  Telegram принимает файлы до 50 МБ — больший клип бот не отправит.
+  Режется один ролик за раз, следующие ждут в очереди.
+  Файлы живут retention_minutes (обычно 30 минут) после последнего использования."""
+
+
 HELP = (
     "Пришли ссылку и таймкоды — вырежу и отправлю ролик.\n\n"
     "Примеры:\n"
     "  https://vm.tiktok.com/XXXX/ 0:10-0:20\n"
     "  https://youtu.be/ID 0:05 0:12\n"
     "  <ссылка> и на следующей строке 1:00-1:15\n\n"
-    "Несколько отрезков — несколько пар через пробел или запятую.\n"
+    "Начало=длительность: 1:00=0:30 — с 1:00 тридцать секунд. Несколько отрезков — через ;\n"
+    "Вместо двоеточия подойдёт , . \\ / — «1/12» это 1 мин 12 с. Подробности — /info\n"
     "Слово «fast» отключает перекодирование (быстро, но границы по ключевому кадру).\n"
     "У готового ролика есть кнопки: «⚡ Без перекодирования» — тот же отрезок за секунды\n"
     "из уже скачанного файла, и «📱 Вертикально 9:16» — кадр под смартфон (можно с размытым фоном).\n"
@@ -389,7 +427,12 @@ def clip_for_bot(
 
 
 def parse_request(text: str) -> Request | None:
-    """Extract the link, its timecode ranges and the fast flag from a message."""
+    """Extract the link, its timecode ranges and the mode flags from a message.
+
+    Ranges are written as ``НАЧАЛО-КОНЕЦ`` or ``НАЧАЛО=ДЛИТЕЛЬНОСТЬ`` and chained
+    with ``;``. Inside a timecode any of ``: , . \ /`` may separate the parts, and
+    a bare pair of timecodes (``0:10 0:20``) still means start and end.
+    """
     if not text:
         return None
     raw = text.strip()
@@ -399,24 +442,54 @@ def parse_request(text: str) -> Request | None:
     source = url_match.group(0).rstrip(".,)")
     rest = raw.replace(url_match.group(0), " ")
 
-    segments: list[Segment] = []
-    for left, right in RANGE_RE.findall(rest):
-        segments.append(Segment(_num(left), _num(right)))
-
-    if not segments:
-        times = [tok for tok in re.split(r"[\s,;]+", rest) if TIME_RE.match(tok)]
-        if len(times) >= 2:
-            for i in range(0, len(times) - 1, 2):
-                segments.append(Segment(_num(times[i]), _num(times[i + 1])))
-
     fast = bool(re.search(r"\b(fast|быстро|быстрый)\b", rest, re.IGNORECASE))
     vertical = bool(
         re.search(r"\b(vertical|вертикаль\w*|9\s*[:xх]\s*16|шортс\w*|reels?)\b", rest, re.IGNORECASE)
     )
     layout = "blur" if re.search(r"\b(blur|размыт\w*|фон)\b", rest, re.IGNORECASE) else "crop"
-    if not segments:
-        return Request(source=source, segments=[], fast=fast, vertical=vertical, layout=layout)
+
+    # Drop the flag words so "1:12 fast" cannot turn into a timecode pair.
+    body = re.sub(
+        r"\b(fast|быстро|быстрый|vertical|вертикаль\w*|blur|размыт\w*|фон|шортс\w*|reels?)\b|9\s*[:xх]\s*16",
+        " ",
+        rest,
+        flags=re.IGNORECASE,
+    )
+    segments = segments_from_text(body)
     return Request(source=source, segments=segments, fast=fast, vertical=vertical, layout=layout)
+
+
+def segments_from_text(body: str) -> list[Segment]:
+    """Pull ranges out of free text without ever guessing at a number."""
+
+    def _timecode(token: str) -> float | None:
+        if not token or not _TC_CHARS_RE.match(token) or not any(c.isdigit() for c in token):
+            return None
+        try:
+            return _num(token)
+        except ValueError:
+            return None
+
+    segments: list[Segment] = []
+    pending: list[float] = []
+    for token in re.split(r"[\s;]+", body):
+        token = token.strip().strip("()[]{}")
+        if not token:
+            continue
+        if "=" in token or "-" in token:
+            try:
+                segments.append(parse_range_spec(token))
+            except ValueError:
+                continue
+            continue
+        value = _timecode(token)
+        if value is None:
+            continue
+        pending.append(value)
+        if len(pending) == 2:
+            segments.append(Segment(pending[0], pending[1]))
+            pending = []
+    return segments
 
 
 def _num(token: str) -> float:
@@ -477,6 +550,10 @@ def handle_message(bot, cfg: Config, message: dict, clipper=None) -> None:
     command = text.split()[0].lower() if text.startswith("/") else ""
     if command in {"/start", "/help"}:
         bot.send_message(chat_id, HELP.format(minutes=cfg.retention_minutes))
+        return
+    if command in ("/info", "/форматы"):
+        for chunk in split_long(INFO):
+            bot.send_message(chat_id, chunk)
         return
     if command == "/id":
         bot.send_message(chat_id, f"chat_id: {chat_id}")

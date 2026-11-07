@@ -5,6 +5,7 @@ import json
 import pytest
 
 from video_clipper.segments import (
+    parse_ranges,
     Segment,
     build_segments,
     load_csv,
@@ -20,6 +21,37 @@ from video_clipper.segments import (
 
 
 class TestParseRangeSpec:
+    def test_equals_means_duration(self):
+        seg = parse_range_spec("1:00=0:30")
+        assert (seg.start, seg.end) == (60.0, 90.0)
+
+    def test_equals_with_bare_seconds(self):
+        seg = parse_range_spec("2:00=45")
+        assert (seg.start, seg.end) == (120.0, 165.0)
+
+    def test_dash_means_end(self):
+        seg = parse_range_spec("0:00-:20")
+        assert (seg.start, seg.end) == (0.0, 20.0)
+
+    def test_zero_duration_is_refused(self):
+        with pytest.raises(ValueError, match="больше нуля"):
+            parse_range_spec("1:00=0")
+
+    def test_new_separators_in_a_range(self):
+        seg = parse_range_spec("1/12-1,30")
+        assert (seg.start, seg.end) == (72.0, 90.0)
+
+    def test_semicolon_chains_ranges(self):
+        segs = parse_ranges("0:10-0:20; 2:00=45; 3:30-3:45")
+        assert [(s.start, s.end) for s in segs] == [
+            (10.0, 20.0),
+            (120.0, 165.0),
+            (210.0, 225.0),
+        ]
+
+    def test_semicolon_in_one_range_argument(self):
+        segs = build_segments(ranges=["0:10-0:20; 1:00=30"])
+        assert len(segs) == 2
     def test_simple(self):
         seg = parse_range_spec("1:12-1:45")
         assert (seg.start, seg.end, seg.duration) == (72.0, 105.0, 33.0)

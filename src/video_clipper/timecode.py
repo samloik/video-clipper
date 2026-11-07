@@ -1,16 +1,28 @@
 """Timecode parsing and formatting.
 
-Accepted input: ``SS``, ``SS.mmm``, ``MM:SS``, ``MM:SS.mmm``, ``HH:MM:SS``,
-``HH:MM:SS.mmm``. A comma is accepted as the decimal separator. Negative values,
-empty strings and anything that is not a timecode are rejected with a message
-that names the offending value.
+Accepted input uses any of ``:`` ``,`` ``.`` ``/`` ``\\`` as the component
+separator, all of them equivalent: ``45``, ``0:45``, ``34:43``, ``1.12``,
+``1/12`` and ``1\\12``. One part is seconds, two are minutes and seconds, three
+are hours, minutes and seconds. An edge part may be omitted — ``:12`` is 0:12,
+``45:`` is 0:45 — while a hole in the middle (``1::30``) is a typo and rejected.
+A final group of exactly three digits after a dot or a comma is milliseconds:
+``1:12.500`` is 72.5 s, ``0.500`` is 0.5 s, but ``0.30`` is 0:30 because two
+digits are read as seconds.
+
+Negative values, empty strings and anything that is not a timecode are rejected
+with a message that names the offending value.
 """
 
 from __future__ import annotations
 
 import re
 
-_SEPARATORS = (":",)
+# Every character people use instead of ":" in the chat.
+_SEPARATOR_RE = re.compile(r"[:\\/,.]")
+# A trailing group after a dot or a comma is a fraction of a second when it has
+# exactly three digits ("1:12.500") or when reading it as a component would make
+# four parts ("00:00:10.5"). "0.30" stays 0:30 — two digits are seconds.
+_FRACTION_RE = re.compile(r"([.,])(\d{1,3})$")
 
 
 def parse_timecode(value: str | int | float) -> float:
@@ -27,17 +39,26 @@ def parse_timecode(value: str | int | float) -> float:
         raise ValueError("Пустой таймкод")
     if raw.startswith("-"):
         raise ValueError(f"Таймкод не может быть отрицательным: {raw!r}")
-    if "," in raw:
-        raw = raw.replace(",", ".")
 
-    parts = raw.split(":")
+    millis = 0
+    fraction_match = _FRACTION_RE.search(raw)
+    if fraction_match:
+        digits = fraction_match.group(2)
+        if len(digits) == 3 or len(_SEPARATOR_RE.split(raw)) == 4:
+            millis = int(digits.ljust(3, "0"))
+            raw = raw[: fraction_match.start()]
+
+    parts = _SEPARATOR_RE.split(raw)
     if len(parts) > 3:
         raise ValueError(f"Некорректный таймкод: {value!r} (ожидается ЧЧ:ММ:СС[.ммм])")
 
-    # Shorthand with an omitted edge part: ":30" means 0:30, "1:" means 1:00.
-    # An omitted middle part ("1::30") stays an error — that is a typo, not a shorthand.
     if not any(p.strip() for p in parts):
-        raise ValueError(f"Некорректный таймкод: {value!r}")
+        if millis:
+            parts = ["0"]
+        else:
+            raise ValueError(f"Некорректный таймкод: {value!r}")
+
+    # Shorthand with an omitted edge part; a hole in the middle stays an error.
     normalized = list(parts)
     for index, part in enumerate(parts):
         if part.strip():
@@ -72,7 +93,7 @@ def parse_timecode(value: str | int | float) -> float:
 
     if seconds < 0:
         raise ValueError(f"Таймкод не может быть отрицательным: {value!r}")
-    return round(seconds, 3)
+    return round(seconds + millis / 1000, 3)
 
 
 def format_timecode(seconds: float, decimals: int = 3) -> str:
