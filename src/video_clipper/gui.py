@@ -33,6 +33,7 @@ from .segments import (
     clip_filename,
     has_open_ends,
     is_open_end,
+    params_summary,
     parse_end_token,
     resolve_open_ends,
     validate_segments,
@@ -933,7 +934,13 @@ async function poll(id) {
       const detail = job.detail ? ' · ' + job.detail : '';
       setStatus(stage + percent + detail, 'busy');
     }
-    if (job.state === 'error') { renderProgress(job); renderEta(job); setStatus(job.error || 'ошибка', 'err'); return; }
+    if (job.state === 'error') {
+      renderProgress(job);
+      renderEta(job);
+      setStatus(job.error || 'ошибка', 'err');
+      showPanel('Ошибка', job.error_details || job.error || 'ошибка');
+      return;
+    }
     if (job.state === 'done') {
       renderProgress(job);
       renderEta(job);
@@ -1110,7 +1117,16 @@ def _run_job(
         _job_update(job_id, state="done", results=payload, files=files, message="")
     except Exception as exc:  # noqa: BLE001 - reported to the page
         log.exception("Ошибка задания %s", job_id)
-        _job_update(job_id, state="error", error=str(exc), message="")
+        reason = str(exc) or exc.__class__.__name__
+        _job_update(
+            job_id,
+            state="error",
+            error=reason.splitlines()[0][:200],
+            error_details=(
+                f"{params_summary(source, segments, fast, vertical, layout)}\n\n{reason}"
+            ),
+            message="",
+        )
 
 
 def default_clipper(

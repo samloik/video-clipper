@@ -409,6 +409,40 @@ class TestOpenEnd:
         assert seen["open_ends"] == [True]
 
 
+class TestErrorDetails:
+    def test_job_error_carries_the_request(self, server_factory, tmp_path):
+        def clipper(*args, **kwargs):
+            raise RuntimeError("Секционная загрузка отклонена сайтом")
+
+        base = server_factory(clipper)
+        media = tmp_path / "v.mp4"
+        media.write_bytes(b"x")
+        status, body = post_json(base, "/api/clip", {
+            "source": str(media),
+            "segments": [{"start": "0:11", "end": "*"}],
+            "vertical": True,
+            "layout": "blur",
+        })
+        assert status == 202
+        for _ in range(60):
+            job = json.loads(get(base, f"/api/jobs/{body['job_id']}")[1])
+            if job["state"] != "running":
+                break
+            time.sleep(0.05)
+        assert job["state"] == "error"
+        assert job["error_details"].startswith(f"Ссылка: {media}")
+        assert "Отрезок:" in job["error_details"]
+        assert "размытый фон" in job["error_details"]
+        assert "Секционная загрузка отклонена сайтом" in job["error_details"]
+        assert job["error"] == "Секционная загрузка отклонена сайтом"
+
+    def test_page_shows_error_details_panel(self):
+        from video_clipper.gui import PAGE
+
+        assert "job.error_details" in PAGE
+        assert "showPanel('Ошибка'" in PAGE
+
+
 class TestBatch:
     def _clipper(self, tmp_path):
         """Возвращает по клипу на каждый отрезок — как настоящий нарезчик."""

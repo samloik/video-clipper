@@ -330,6 +330,30 @@ def has_open_ends(segments: list[Segment]) -> bool:
     return any(is_open_end(seg) for seg in segments)
 
 
+def params_summary(
+    source: str,
+    segments: list[Segment],
+    fast: bool = False,
+    vertical: bool = False,
+    layout: str = "crop",
+) -> str:
+    """What exactly was asked for — shown above any error, so it is clear what failed."""
+    modes = ["без перекодирования" if fast else "точный"]
+    if vertical:
+        modes.append("9:16, размытый фон" if layout == "blur" else "9:16, обрезать бока")
+    lines = [f"Ссылка: {source}"]
+    if not segments:
+        lines.append("Отрезок: весь ролик")
+    elif len(segments) == 1:
+        lines.append(f"Отрезок: {segments[0].label}")
+    else:
+        shown = "; ".join(seg.label for seg in segments[:6])
+        more = f" и ещё {len(segments) - 6}" if len(segments) > 6 else ""
+        lines.append(f"Отрезки ({len(segments)}): {shown}{more}")
+    lines.append(f"Режим: {', '.join(modes)}")
+    return "\n".join(lines)
+
+
 def output_filename(slug: str, seg: Segment, name: str | None = None) -> str:
     """``<slug>__<start>__<end>.mp4`` or ``<name>.mp4`` when a name is given."""
     if name:

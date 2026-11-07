@@ -154,6 +154,32 @@ class TestOpenEnd:
         assert any("0:20" in text or "00:20" in text for _, text in bot.messages)
 
 
+class TestErrorContext:
+    def test_failure_starts_with_the_request(self, tmp_path, monkeypatch):
+        from video_clipper.source import SourceError
+
+        monkeypatch.setattr(
+            "video_clipper.bot.fetch_metadata", lambda source, cfg: {"duration": 60.0}
+        )
+
+        def clipper(*args, **kwargs):
+            raise SourceError("Секционная загрузка отклонена сайтом")
+
+        bot = FakeBot()
+        bot.send_message = lambda chat, text, **kw: bot.messages.append((chat, text))
+        handle_message(
+            bot,
+            _cfg(tmp_path),
+            {"chat": {"id": 1}, "text": "https://youtu.be/ID вертикально 11-*"},
+            clipper=clipper,
+        )
+        text = [t for _, t in bot.messages if "Ошибка" in t][-1]
+        assert text.startswith("Ссылка: https://youtu.be/ID")
+        assert "Отрезок:" in text and "Режим:" in text
+        assert "Ошибка: Секционная загрузка отклонена сайтом" in text
+        assert "9:16" in text
+
+
 class TestTimeCommand:
     def _cfg(self, tmp_path):
         cfg = _cfg(tmp_path)

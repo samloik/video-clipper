@@ -6,6 +6,7 @@ import pytest
 
 from video_clipper.segments import (
     is_open_end,
+    params_summary,
     parse_ranges,
     resolve_open_ends,
     Segment,
@@ -297,3 +298,32 @@ class TestOpenEnd:
     def test_equals_still_means_duration(self):
         seg = parse_range_spec("20=5")
         assert seg.end == 25.0 and not is_open_end(seg)
+
+
+class TestParamsSummary:
+    def test_single_segment(self):
+        text = params_summary("https://youtu.be/ID", [Segment(11, 30)])
+        assert "Ссылка: https://youtu.be/ID" in text
+        assert "Отрезок: 00:00:11–00:00:30" in text
+        assert "Режим: точный" in text
+
+    def test_open_end_is_named(self):
+        text = params_summary("https://youtu.be/ID", [parse_range_spec("11-*")])
+        assert "00:00:11–конец" in text
+
+    def test_whole_video(self):
+        assert "весь ролик" in params_summary("https://youtu.be/ID", [])
+
+    def test_many_segments_are_counted(self):
+        segs = [Segment(i, i + 1) for i in range(9)]
+        text = params_summary("u", segs)
+        assert "Отрезки (9)" in text and "и ещё 3" in text
+
+    def test_modes(self):
+        assert "без перекодирования" in params_summary("u", [Segment(0, 1)], fast=True)
+        assert "размытый фон" in params_summary(
+            "u", [Segment(0, 1)], vertical=True, layout="blur"
+        )
+        assert "обрезать бока" in params_summary(
+            "u", [Segment(0, 1)], vertical=True, layout="crop"
+        )

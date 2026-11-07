@@ -40,6 +40,7 @@ from .segments import (
     Segment,
     has_open_ends,
     is_open_end,
+    params_summary,
     parse_range_spec,
     resolve_open_ends,
 )
@@ -1221,7 +1222,8 @@ def handle_message(bot, cfg: Config, message: dict, clipper=None) -> None:
             due = schedule_retry_at(bot, cfg, chat_id, text, exc.until)
             bot.send_message(
                 chat_id,
-                f"{exc}\nПовторю сам в {time.strftime('%H:%M', time.localtime(due))}. "
+                f"{params_summary(request.source, request.segments, request.fast, request.vertical, request.layout)}"
+                f"\n\n{exc}\nПовторю сам в {time.strftime('%H:%M', time.localtime(due))}. "
                 f"Отменить — /stop.",
             )
             return
@@ -1232,14 +1234,19 @@ def handle_message(bot, cfg: Config, message: dict, clipper=None) -> None:
             reporter.finish("⏳ YouTube просит подтверждение")
             bot.send_message(
                 chat_id,
-                f"YouTube потребовал подтверждения, что клиент не бот. Это ограничение "
+                f"{params_summary(request.source, request.segments, request.fast, request.vertical, request.layout)}"
+                f"\n\nYouTube потребовал подтверждения, что клиент не бот. Это ограничение "
                 f"этого IP, а не cookies.\n"
                 f"Повторю тот же запрос сам в {time.strftime('%H:%M', time.localtime(due))} — "
                 f"обычно к этому времени проходит. Отменить — /stop.",
             )
             return
         reporter.finish("⚠️ Ошибка")
-        bot.send_message(chat_id, f"Ошибка: {exc}")
+        bot.send_message(
+            chat_id,
+            f"{params_summary(request.source, request.segments, request.fast, request.vertical, request.layout)}"
+            f"\n\nОшибка: {exc}",
+        )
         return
     reporter.finish("✅ Готово, отправляю...")
 
