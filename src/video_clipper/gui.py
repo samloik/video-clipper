@@ -11,6 +11,7 @@ import hashlib
 import hmac
 import json
 import logging
+import mimetypes
 import os
 import re
 import secrets
@@ -29,6 +30,7 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 from .config import Config, apply_retention_override, load_config
 from .cut import ClipResult, CutCancelled, clamp_horizontal
 from .probe import EnvironmentProblem, check_tools
+from .preview import grab_frame, local_source, probe_media
 from .segments import (
     Segment,
     clip_filename,
@@ -301,7 +303,25 @@ input::placeholder{color:#78818e}
 .segments li button{background:transparent;border:0;color:var(--ink-3);cursor:pointer;
   font-size:14px;line-height:1;padding:4px 6px;min-height:26px;border-radius:6px}
 .segments li button:hover{color:var(--err);background:#1e1513}
-.seg-count{font-size:12px;color:var(--ink-3);margin-top:6px;min-height:14px}
+.seg-count{font-size:11.5px;color:var(--ink-3);margin-top:8px;min-height:14px}
+.preview{margin-top:10px;padding:10px;border:1px solid var(--line);border-radius:10px;
+  background:var(--panel-2,#15181d);display:flex;flex-direction:column;gap:9px}
+.preview[hidden]{display:none}
+.preview .thumbs{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.preview figure{margin:0;display:flex;flex-direction:column;gap:5px}
+.preview img{width:100%;aspect-ratio:16/9;object-fit:cover;border-radius:7px;
+  background:#0b0d10;border:1px solid var(--line);display:block}
+.preview figcaption{font-size:11px;color:var(--ink-3)}
+.preview figcaption b{color:var(--ink-2);font-weight:500}
+.preview-bar{display:flex;flex-wrap:wrap;gap:6px}
+.preview-bar .ghost{min-height:26px;padding:2px 8px;font-size:11px;border-radius:6px}
+.preview-bar .play{margin-left:auto;min-height:26px;padding:2px 10px;font-size:11.5px;
+  border-radius:6px;border:1px solid var(--accent);background:transparent;color:var(--accent);
+  cursor:pointer}
+.preview-bar .play:hover{background:var(--accent);color:#101214}
+.preview video{width:100%;border-radius:8px;background:#000;display:block}
+.preview video[hidden]{display:none}
+.preview-note{font-size:11px;color:var(--ink-3);font-family:var(--mono)}
 .presets .reset{margin-left:auto;border-color:transparent;color:var(--ink-3);
   text-decoration:underline;text-underline-offset:3px;font-family:var(--sans)}
 .presets .reset:hover{color:var(--ink-2)}
@@ -479,6 +499,27 @@ input::placeholder{color:#78818e}
       </div>
       <ul class="segments" id="segments" hidden></ul>
       <div class="seg-count mono" id="seg-count"></div>
+      <div class="preview" id="preview" hidden>
+        <div class="thumbs">
+          <figure>
+            <img id="thumb-start" alt="кадр в начале отрезка">
+            <figcaption>начало <b id="cap-start" class="mono">0:00</b></figcaption>
+          </figure>
+          <figure>
+            <img id="thumb-end" alt="кадр в конце отрезка">
+            <figcaption>конец <b id="cap-end" class="mono">0:30</b></figcaption>
+          </figure>
+        </div>
+        <div class="preview-bar">
+          <button type="button" class="ghost" id="step-back" title="на секунду назад">−1 с</button>
+          <button type="button" class="ghost" id="frame-back" title="на кадр назад">− кадр</button>
+          <button type="button" class="ghost" id="frame-fwd" title="на кадр вперёд">+ кадр</button>
+          <button type="button" class="ghost" id="step-fwd" title="на секунду вперёд">+1 с</button>
+          <button type="button" class="play" id="play-seg">▶ посмотреть отрезок</button>
+        </div>
+        <video id="player" playsinline controls hidden></video>
+        <div class="preview-note" id="preview-note"></div>
+      </div>
       <p class="hint" style="margin-top:9px">Таймкоды: <b>45</b>, <b>1:12</b>, <b>0:00:10</b>.
         Вместо «-» можно «=»: <b>1:00=0:30</b> — с 1:00 тридцать секунд.<br>
         «до конца» или <b>*</b> во втором поле — от начала до конца ролика.</p>
@@ -849,9 +890,16 @@ function modeName(mode) {
 }
 
 function toSeconds(text) {
-  let buf = String(text).trim();
-  [':', ',', '.', '/', String.fromCharCode(92)].forEach(sep => { buf = buf.split(sep).join(':'); });
-  const parts = buf.split(':').filter(p => p !== '').map(p => parseFloat(p) || 0);
+  const raw = String(text).trim();
+  if (!raw) return 0;
+  // три цифры после разделителя — это миллисекунды, а не ещё одна часть таймкода
+  const guarded = raw.replace(new RegExp('[,.:]([0-9]{3})(?![0-9])', 'g'), '§$1');
+  // обратную косую черту, точку, запятую и слэш приводим к двоеточию без регулярок:
+  // в HTML-строке Python экранирование съедает «\\», и класс символов ломается
+  let normal = guarded.split(String.fromCharCode(92)).join(':');
+  normal = normal.split('.').join(':').split(',').join(':').split('/').join(':');
+  const parts = normal.split(':').filter(part => part !== '')
+    .map(part => parseFloat(part.replace('§', '.')) || 0);
   if (parts.length === 1) return parts[0];
   if (parts.length === 2) return parts[0] * 60 + parts[1];
   return parts[0] * 3600 + parts[1] * 60 + parts[2];
@@ -889,6 +937,7 @@ async function upload(file) {
     urlEl.value = '';
     $('drop-sub').textContent = 'файл готов · ' + mb + ' МБ';
     setStatus('Файл загружен — задай диапазон и нажми «Нарезать»');
+    loadMedia();
   } catch (err) {
     drop.classList.remove('has-file');
     $('drop-title').textContent = 'Выбери файл или перетащи';
@@ -977,6 +1026,126 @@ function syncPreset() {
 }
 [$('start'), $('end')].forEach(el => el.addEventListener('input', syncPreset));
 syncPreset();
+
+const previewEl = $('preview'), playerEl = $('player'), previewNoteEl = $('preview-note');
+let mediaInfo = null, activeField = 'start', previewTimer = null;
+
+function activeInput() { return activeField === 'end' ? $('end') : $('start'); }
+['start', 'end'].forEach(id => {
+  $(id).addEventListener('focus', () => { activeField = id; });
+});
+
+function fmtTC(seconds) {
+  const s = Math.max(0, seconds);
+  const m = Math.floor(s / 60);
+  const rest = s - m * 60;
+  const whole = Math.floor(rest);
+  const ms = Math.round((rest - whole) * 1000);
+  const tail = String(whole).padStart(2, '0') +
+    (ms ? '.' + String(ms).padStart(3, '0') : '');
+  return m + ':' + tail;
+}
+
+function frameUrl(tc) {
+  const t = Math.max(0, toSeconds(tc));
+  return '/api/frame?source=' + encodeURIComponent(currentSource()) +
+    '&t=' + t.toFixed(3) + '&w=360&_=' + Date.now();
+}
+
+function refreshThumbs() {
+  const source = currentSource();
+  if (!source) { previewEl.hidden = true; return; }
+  const start = $('start').value.trim(), end = $('end').value.trim();
+  $('cap-start').textContent = start || '0:00';
+  $('cap-end').textContent = end || '—';
+  const startImg = $('thumb-start'), endImg = $('thumb-end');
+  startImg.src = frameUrl(start || '0');
+  if (end && end !== '*') endImg.src = frameUrl(end);
+  else { endImg.removeAttribute('src'); endImg.alt = 'конец не задан'; }
+}
+
+async function loadMedia() {
+  const source = currentSource();
+  if (!source) { previewEl.hidden = true; mediaInfo = null; return; }
+  try {
+    const res = await fetch('/api/media?source=' + encodeURIComponent(source));
+    const data = await res.json();
+    if (!res.ok) {
+      previewEl.hidden = true;
+      mediaInfo = null;
+      previewNoteEl.textContent = '';
+      return;
+    }
+    mediaInfo = data;
+    previewEl.hidden = false;
+    previewNoteEl.textContent = data.duration
+      ? 'в ролике ' + fmtSeconds(data.duration) +
+        (data.fps ? ' · ' + data.fps.toFixed(2).replace('.', ',') + ' кадр/с' : '')
+      : '';
+    refreshThumbs();
+  } catch (err) {
+    previewEl.hidden = true;
+  }
+}
+
+function schedulePreview() {
+  clearTimeout(previewTimer);
+  previewTimer = setTimeout(loadMedia, 350);
+}
+
+urlEl.addEventListener('input', schedulePreview);
+[$('start'), $('end')].forEach(el => el.addEventListener('input', schedulePreview));
+urlEl.addEventListener('blur', schedulePreview);
+
+function stepField(delta) {
+  const input = activeInput();
+  const raw = input.value.trim();
+  if (raw === '*') return;
+  const base = toSeconds(raw || '0');
+  if (!Number.isFinite(base)) return;
+  input.value = fmtTC(Math.max(0, base + delta));
+  syncPreset();
+  schedulePreview();
+  setStatus('Правлю ' + (activeField === 'end' ? 'конец' : 'начало') + ': ' + input.value);
+}
+
+$('step-back').addEventListener('click', () => stepField(-1));
+$('step-fwd').addEventListener('click', () => stepField(1));
+$('frame-back').addEventListener('click', () => stepField(-(mediaInfo && mediaInfo.fps ? 1 / mediaInfo.fps : 0.04)));
+$('frame-fwd').addEventListener('click', () => stepField(mediaInfo && mediaInfo.fps ? 1 / mediaInfo.fps : 0.04));
+
+$('play-seg').addEventListener('click', () => {
+  const source = currentSource();
+  if (!source) { setStatus('Сначала выбери файл или ссылку', 'err'); return; }
+  const startText = $('start').value.trim() || '0:00';
+  const endText = $('end').value.trim();
+  const start = toSeconds(startText);
+  const end = (!endText || endText === '*')
+    ? (mediaInfo && mediaInfo.duration ? mediaInfo.duration : 0)
+    : toSeconds(endText);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
+    setStatus('Конец должен быть больше начала', 'err');
+    return;
+  }
+  playerEl.hidden = false;
+  playerEl.dataset.start = String(start);
+  playerEl.dataset.end = String(end);
+  playerEl.onloadedmetadata = () => { playerEl.currentTime = start; };
+  playerEl.muted = false;
+  playerEl.ontimeupdate = () => {
+    if (playerEl.currentTime >= end) {
+      playerEl.pause();
+      playerEl.currentTime = Math.max(start, end - 0.05);
+    }
+  };
+  playerEl.src = '/api/source?source=' + encodeURIComponent(source) + '&_=' + Date.now();
+  // play() зовём прямо в обработчике клика: после await браузер уже не считает это жестом
+  playerEl.play().catch(() => {
+    previewNoteEl.textContent = 'браузер не дал автозапуск — нажми ▶ в плеере';
+  });
+  previewNoteEl.textContent = 'проверяю ' + startText + ' – ' + (endText || fmtTC(end)) +
+    ' — это тот же отрезок, что уйдёт в нарезку';
+});
 
 async function run() {
   resultsEl.innerHTML = '';
@@ -1251,6 +1420,21 @@ def auto_horizontal(source: str, cfg: Config) -> tuple[float, str]:
     span = info.width - window_w
     position = clamp_horizontal((center - window_w / 2) / span if span > 0 else 0.5)
     return position, f"содержимое {width}px с {left}px → окно {position * 100:.0f}%"
+
+
+def _allowed_media(path: Path, cfg: Config) -> bool:
+    """Отдавать по HTTP можно только то, что лежит в рабочих каталогах."""
+    try:
+        resolved = path.resolve()
+    except OSError:
+        return False
+    for root in (cfg.cache_dir, cfg.output_dir):
+        try:
+            resolved.relative_to(Path(root).expanduser().resolve())
+            return True
+        except (ValueError, OSError):
+            continue
+    return False
 
 
 def _free_mb(cfg: Config) -> float:
@@ -1644,6 +1828,11 @@ GUI_HELP = """Как пользоваться
 Режимы
   «без перекодирования» — режет по ключевому кадру: секунды вместо минут, зато начало
      может уехать до ближайшего ключевого кадра.
+  Под диапазоном — кадры начала и конца: видно, что попадёт в клип, ещё до нарезки.
+     «± кадр» и «±1 с» двигают границу (шаг кадра берётся из файла), «посмотреть отрезок»
+     проигрывает ровно его — по исходнику, без нарезки.
+     Для ссылки предпросмотр появится после первой нарезки: файл останется в кэше.
+
   «вертикально 9:16» — кадр под смартфон, фон на выбор: обрезать бока или размытый.
      Источник 720p остаётся 720×1280 — без апскейла и мыла.
      Ползунок «окно» двигает кадр по горизонтали (0% слева, 50% центр, 100% справа),
@@ -1778,7 +1967,61 @@ def make_handler(
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
-            self.wfile.write(body)
+            if self.command != "HEAD":
+                self.wfile.write(body)
+
+        def _serve_media(self, path: Path) -> None:
+            """Отдать исходник с поддержкой Range — браузер проигрывает отрезок без нарезки."""
+            size = path.stat().st_size
+            if not size:
+                self._error(404, "пустой файл")
+                return
+            start, end, partial = 0, size - 1, False
+            header = (self.headers.get("Range") or "").strip()
+            if header.startswith("bytes="):
+                spec = header[6:].split(",")[0].strip()
+                left, _, right = spec.partition("-")
+                try:
+                    if left:
+                        start = max(0, int(left))
+                        end = int(right) if right else size - 1
+                    elif right:
+                        length = max(0, int(right))
+                        start = max(0, size - length)
+                    partial = True
+                except ValueError:
+                    start, end, partial = 0, size - 1, False
+            if start >= size or start > end:
+                self.send_response(416)
+                self.send_header("Content-Range", f"bytes */{size}")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            end = min(end, size - 1)
+            length = end - start + 1
+            guess = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+            self.send_response(206 if partial else 200)
+            self.send_header("Content-Type", guess)
+            self.send_header("Accept-Ranges", "bytes")
+            self.send_header("Content-Length", str(length))
+            if partial:
+                self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            if self.command == "HEAD":
+                return
+            try:
+                with path.open("rb") as handle:
+                    handle.seek(start)
+                    left = length
+                    while left > 0:
+                        chunk = handle.read(min(1 << 20, left))
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+                        left -= len(chunk)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
 
         def _error(self, code: int, message: str) -> None:
             self._send(code, _dumps({"error": message}))
@@ -1845,6 +2088,42 @@ def make_handler(
                         }
                     ),
                 )
+                return
+            if path in ("/api/media", "/api/frame", "/api/source"):
+                query = parse_qs(urlparse(self.path).query)
+                source = (query.get("source") or [""])[0]
+                local = local_source(source, cfg)
+                if local is None:
+                    self._error(
+                        409,
+                        "источника ещё нет на машине: нарежь один отрезок — "
+                        "файл скачается и останется в кэше для предпросмотра",
+                    )
+                    return
+                if not _allowed_media(local, cfg):
+                    self._error(403, "файл вне рабочих каталогов")
+                    return
+                if path == "/api/media":
+                    self._send(200, _dumps(probe_media(local)))
+                    return
+                if path == "/api/source":
+                    self._serve_media(local)
+                    return
+                raw_t = (query.get("t") or ["0"])[0]
+                try:
+                    seconds = float(raw_t)
+                except (TypeError, ValueError):
+                    self._error(400, "не понял время кадра")
+                    return
+                try:
+                    width = int((query.get("w") or ["480"])[0] or 480)
+                except ValueError:
+                    width = 480
+                frame = grab_frame(local, seconds, width)
+                if not frame:
+                    self._error(404, "кадр не получился")
+                    return
+                self._send(200, frame, "image/jpeg")
                 return
             if path == "/api/retention":
                 from .timecode import format_retention
@@ -1922,6 +2201,9 @@ def make_handler(
                     shutil.copyfileobj(src, self.wfile, 1 << 20)
                 return
             self._error(404, "не найдено")
+
+        def do_HEAD(self) -> None:  # noqa: N802
+            self._guard(self._handle_get)
 
         def do_POST(self) -> None:  # noqa: N802
             self._guard(self._handle_post)

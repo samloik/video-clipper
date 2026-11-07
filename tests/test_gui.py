@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import threading
 import time
@@ -528,6 +529,132 @@ class TestDiskAndHistory:
         assert old in result.removed
         assert result.freed_bytes >= 4096
         assert not old.exists()
+
+
+class TestTimecodeParserInPage:
+    """Таймкоды в браузере должны читаться так же, как в боте: «0:02.040» — это 2,04 с."""
+
+    def _function(self) -> str:
+        from video_clipper.gui import PAGE
+
+        start = PAGE.index("function toSeconds(text)")
+        end = PAGE.index("\n}", start) + 2
+        return PAGE[start:end]
+
+    def test_browser_parser_matches_the_bot(self):
+        node = shutil.which("node")
+        if not node:
+            pytest.skip("нужен node, чтобы прогнать JS-парсер")
+        assert node
+        script = self._function() + (
+            "\nconsole.log(JSON.stringify([toSeconds('0:02.040'), toSeconds('1.12'),"
+            " toSeconds('12.500'), toSeconds('1:02:03'), toSeconds('45'),"
+            " toSeconds('0:10-0:20'.split('-')[0])]));"
+        )
+        out = subprocess.run([node, "-e", script], capture_output=True, text=True)
+        assert out.returncode == 0, out.stderr
+        assert json.loads(out.stdout) == [2.04, 72, 12.5, 3723, 45, 10]
+
+
+class TestPreview:
+    """Границы видно до нарезки: кадры, паспорт файла и проигрывание по Range."""
+
+    def _video(self, cfg, seconds=2):
+        if subprocess.run(["which", "ffmpeg"], capture_output=True).returncode != 0:
+            pytest.skip("нужен ffmpeg")
+        cfg.cache_dir.mkdir(parents=True, exist_ok=True)
+        path = cfg.cache_dir / "upload-тест.mp4"
+        subprocess.run(
+            [
+                "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                "-f", "lavfi", "-i", f"testsrc2=size=320x240:rate=25:duration={seconds}",
+                "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", str(path),
+            ],
+            check=True,
+        )
+        return path
+
+    def test_passport(self, server_factory, cfg):
+        video = self._video(cfg)
+        base = server_factory(fake_clipper(cfg.output_dir / "c.mp4"))
+        status, body, _ = _get(base + "/api/media?source=" + quote(str(video), safe=""))
+        data = json.loads(body)
+        assert status == 200
+        assert data["width"] == 320 and data["height"] == 240
+        assert data["fps"] == pytest.approx(25.0, abs=0.01)
+        assert data["duration"] == pytest.approx(2.0, abs=0.2)
+
+    def test_frame_is_jpeg(self, server_factory, cfg):
+        video = self._video(cfg)
+        base = server_factory(fake_clipper(cfg.output_dir / "c.mp4"))
+        status, body, headers = _get(
+            base + "/api/frame?source=" + quote(str(video), safe="") + "&t=1.0&w=200"
+        )
+        assert status == 200
+        assert headers["Content-Type"] == "image/jpeg"
+        assert body[:2] == b"\xff\xd8"
+
+    def test_bad_time_is_rejected(self, server_factory, cfg):
+        video = self._video(cfg)
+        base = server_factory(fake_clipper(cfg.output_dir / "c.mp4"))
+        status, body, _ = _get(
+            base + "/api/frame?source=" + quote(str(video), safe="") + "&t=" + quote("завтра")
+        )
+        assert status == 400
+
+    def test_link_without_download_explains_itself(self, server_factory, cfg):
+        base = server_factory(fake_clipper(cfg.output_dir / "c.mp4"))
+        status, body, _ = _get(
+            base + "/api/media?source=" + quote("https://youtu.be/НОТВКЭШЕ", safe="")
+        )
+        assert status == 409
+        assert "ещё нет на машине" in json.loads(body)["error"]
+
+    def test_file_outside_work_dirs_is_refused(self, server_factory, cfg, tmp_path):
+        outsider = tmp_path / "чужой.mp4"
+        outsider.write_bytes(b"x" * 100)
+        base = server_factory(fake_clipper(cfg.output_dir / "c.mp4"))
+        status, body, _ = _get(base + "/api/source?source=" + quote(str(outsider), safe=""))
+        assert status == 403
+        assert "вне рабочих" in json.loads(body)["error"]
+
+    def test_source_is_served_in_chunks(self, server_factory, cfg):
+        video = self._video(cfg)
+        size = video.stat().st_size
+        base = server_factory(fake_clipper(cfg.output_dir / "c.mp4"))
+        url = base + "/api/source?source=" + quote(str(video), safe="")
+
+        status, body, headers = _get(url)
+        assert status == 200 and len(body) == size
+        assert headers["Accept-Ranges"] == "bytes"
+
+        status, body, headers = _get(url, headers={"Range": "bytes=0-99"})
+        assert status == 206 and len(body) == 100
+        assert headers["Content-Range"] == f"bytes 0-99/{size}"
+        assert body == video.read_bytes()[:100]
+
+        status, body, headers = _get(url, headers={"Range": "bytes=-50"})
+        assert status == 206 and len(body) == 50
+        assert body == video.read_bytes()[-50:]
+
+        status, body, _ = _get(url, headers={"Range": f"bytes={size + 10}-"})
+        assert status == 416
+
+    def test_head_gives_headers_without_body(self, server_factory, cfg):
+        video = self._video(cfg)
+        base = server_factory(fake_clipper(cfg.output_dir / "c.mp4"))
+        status, body, headers = _get(
+            base + "/api/source?source=" + quote(str(video), safe=""), method="HEAD"
+        )
+        assert status == 200 and body == b""
+        assert headers["Content-Length"] == str(video.stat().st_size)
+
+    def test_page_has_the_preview_block(self):
+        from video_clipper.gui import PAGE
+
+        for marker in ('id="preview"', 'id="thumb-start"', 'id="thumb-end"',
+                       'id="play-seg"', 'id="frame-fwd"', "/api/frame", "/api/media"):
+            assert marker in PAGE, marker
 
 
 class TestVerticalWindow:
