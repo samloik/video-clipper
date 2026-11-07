@@ -86,6 +86,7 @@ https://youtu.be/ID 0:10-0:20
   fast / быстро     без перекодирования, границы по ключевым кадрам (в разы быстрее)
   вертикально       вертикальный кадр 9:16 (обрезает бока)
   фон / размыт      вертикальный кадр с размытой подложкой
+  сместить 30       окно 9:16 сдвинуть: 0 — левый край, 50 — центр, 100 — правый
 
 КОМАНДЫ
   /info     эта памятка
@@ -181,6 +182,8 @@ class Request:
     fast: bool = False
     vertical: bool = False
     layout: str = "crop"
+    # где стоит окно 9:16: 0 — влево, 0.5 — центр, 1 — вправо
+    horizontal: float = 0.5
 
 
 class TelegramError(RuntimeError):
@@ -493,6 +496,7 @@ def clip_for_bot(
     vertical: bool = False,
     layout: str = "crop",
     progress: "Callable[[str, float | None, str], None] | None" = None,
+    horizontal: float = 0.5,
 ) -> tuple[list, dict]:
     """Cut for the bot and keep the source file so a re-cut is instant.
 
@@ -563,7 +567,10 @@ def clip_for_bot(
 
         result = cut_segment(
             str(src.path),
-            out_dir / vertical_name(clip_filename(src.title, source, shown), vertical, layout),
+            out_dir
+            / vertical_name(
+                clip_filename(src.title, source, shown), vertical, layout, horizontal
+            ),
             seg,
             fast=fast,
             ffmpeg_path=cfg.ffmpeg_path,
@@ -575,6 +582,7 @@ def clip_for_bot(
             ),
             timeout=FFMPEG_TIMEOUT,
             progress=clip_progress,
+            horizontal=horizontal,
         )
         result.segment = shown
         results.append(result)
@@ -583,6 +591,7 @@ def clip_for_bot(
         "height": src.info.height,
         "vertical": vertical,
         "layout": layout,
+        "horizontal": horizontal,
         "path": str(src.path),
         "segments": [{"start": s.start, "end": s.end} for s in shifted],
         "shown": [{"start": s.start, "end": s.end} for s in segments],
@@ -610,7 +619,23 @@ def parse_request(text: str) -> Request | None:
     rest = raw.replace(url_match.group(0), " ")
 
     segments, fast, vertical, layout = parse_flags_and_segments(rest)
-    return Request(source=source, segments=segments, fast=fast, vertical=vertical, layout=layout)
+    return Request(
+        source=source,
+        segments=segments,
+        fast=fast,
+        vertical=vertical,
+        layout=layout,
+        horizontal=parse_horizontal(rest),
+    )
+
+
+def parse_horizontal(text: str) -> float:
+    """«сместить 30», «окно 70%», «кроп 25» — положение окна 9:16 в процентах."""
+    match = re.search(r"(?:сместить|смести|окно|кроп)\s*(\d{1,3})\s*%?", text, re.IGNORECASE)
+    if not match:
+        return 0.5
+    value = min(100, max(0, int(match.group(1))))
+    return value / 100
 
 
 def parse_flags_and_segments(rest: str) -> tuple[list[Segment], bool, bool, str]:
@@ -686,6 +711,8 @@ def describe_request(
         )
         if enabled
     ]
+    if request.vertical and abs(request.horizontal - 0.5) > 0.01:
+        modes.append(f"окно {request.horizontal * 100:.0f}%")
     mode_text = f", режим: {', '.join(modes)}" if modes else ", режим: точный"
     if not request.segments:
         return (
@@ -1219,11 +1246,27 @@ def handle_message(bot, cfg: Config, message: dict, clipper=None) -> None:
                     progress=reporter.update,
                     vertical=request.vertical,
                     layout=request.layout,
+                    horizontal=request.horizontal,
                 )
-            except TypeError:  # a clipper that does not know about vertical/layout
-                results = clipper(
-                    request.source, request.segments, request.fast, cfg, progress=reporter.update
-                )
+            except TypeError:  # a clipper that does not know these arguments
+                try:
+                    results = clipper(
+                        request.source,
+                        request.segments,
+                        request.fast,
+                        cfg,
+                        progress=reporter.update,
+                        vertical=request.vertical,
+                        layout=request.layout,
+                    )
+                except TypeError:
+                    results = clipper(
+                        request.source,
+                        request.segments,
+                        request.fast,
+                        cfg,
+                        progress=reporter.update,
+                    )
         else:
             results, job = clip_for_bot(
                 request.source,
@@ -1233,6 +1276,7 @@ def handle_message(bot, cfg: Config, message: dict, clipper=None) -> None:
                 vertical=request.vertical,
                 layout=request.layout,
                 progress=reporter.update,
+                horizontal=request.horizontal,
             )
     except JobCancelled:
         reporter.finish("⛔️ Остановлено")
@@ -1276,6 +1320,11 @@ def handle_message(bot, cfg: Config, message: dict, clipper=None) -> None:
         )
         return
     reporter.finish("✅ Готово, отправляю...")
+    if request.vertical:
+        # запомним позицию окна для этого источника — её подхватит GUI и /resume
+        from .storage import save_position
+
+        save_position(cfg.vertical_map_path(), request.source, request.horizontal)
 
     job_key = ""
     if job is not None:
@@ -1401,6 +1450,7 @@ def handle_callback(bot, cfg: Config, callback: dict) -> None:
                     ),
                     vertical,
                     layout,
+                    float(job.get("horizontal", 0.5)),
                 ),
                 seg,
                 fast=fast,
@@ -1414,6 +1464,7 @@ def handle_callback(bot, cfg: Config, callback: dict) -> None:
                 timeout=FFMPEG_TIMEOUT,
                 progress=clip_progress if reporter is not None else None,
                 cancel=STOP_REQUESTED if reporter is not None else None,
+                horizontal=float(job.get("horizontal", 0.5)),
             )
         except (JobCancelled, CutCancelled):
             if reporter is not None:

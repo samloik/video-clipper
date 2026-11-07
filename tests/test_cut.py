@@ -10,11 +10,13 @@ import pytest
 
 from video_clipper.cut import (
     CutCancelled,
+    clamp_horizontal,
     CutError,
     build_ffmpeg_command,
     cut_segment,
     remove_source,
     split_for_telegram,
+    vertical_args,
 )
 from video_clipper.probe import probe_media
 from video_clipper.segments import Segment
@@ -77,7 +79,7 @@ class TestVertical:
         # blur is computed on a small backdrop (270x480) and scaled up
         assert "gblur=sigma=8" in joined
         assert "scale=270:480" in joined
-        assert "overlay=(W-w)/2:(H-h)/2" in joined
+        assert "overlay=(W-w)*0.5000:(H-h)/2" in joined
 
     def test_vertical_ignores_fast(self):
         cmd = build_ffmpeg_command("in.mp4", "out.mp4", Segment(0, 1), fast=True, vertical=True)
@@ -341,3 +343,40 @@ class TestCancel:
         control.stop()
         assert control.is_set() is True
         assert proc.killed is True
+
+
+class TestHorizontalWindow:
+    def test_crop_window_moves_left_and_right(self):
+        left = vertical_args("crop", (720, 1280), 0.0)
+        right = vertical_args("crop", (720, 1280), 1.0)
+        centre = vertical_args("crop", (720, 1280), 0.5)
+        assert "crop=720:1280:(iw-720)*0.0000" in left[1]
+        assert "crop=720:1280:(iw-720)*1.0000" in right[1]
+        assert "crop=720:1280:(iw-720)*0.5000" in centre[1]
+
+    def test_blur_overlay_uses_the_same_shift(self):
+        _, filt = vertical_args("blur", (720, 1280), 0.25)
+        assert "overlay=(W-w)*0.2500" in filt
+
+    def test_values_are_clamped(self):
+        assert clamp_horizontal(-3) == 0.0
+        assert clamp_horizontal(9) == 1.0
+        assert clamp_horizontal(None) == 0.5
+        assert clamp_horizontal(float("nan")) == 0.5
+        assert clamp_horizontal("0.3") == 0.3
+
+    def test_filename_marks_the_window(self):
+        from video_clipper.cut import vertical_name
+
+        assert vertical_name("a.mp4", True, "crop", 0.5) == "a_vertical.mp4"
+        assert vertical_name("a.mp4", True, "crop", 0.7) == "a_vertical_krop70.mp4"
+        assert vertical_name("a.mp4", True, "blur", 0.0) == "a_vertical_blur_krop0.mp4"
+        assert vertical_name("a.mp4", False, "crop", 0.7) == "a.mp4"
+
+    def test_command_carries_the_position(self):
+        cmd = build_ffmpeg_command(
+            "in.mp4", "out.mp4", Segment(0, 1), vertical=True, vertical_size=(720, 1280),
+            horizontal=0.75,
+        )
+        joined = " ".join(cmd)
+        assert "(iw-720)*0.7500" in joined

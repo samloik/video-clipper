@@ -44,6 +44,7 @@ DEFAULTS: dict[str, Any] = {
     "min_free_mb": 500,
     "auto_clean_free_mb": 2000,
     "history_file": None,
+    "vertical_positions_file": None,
     "gui_port": 8766,
     "log_file": "./video-clipper.log",
 }
@@ -82,6 +83,15 @@ class Config:
     min_free_mb: int = 500
     auto_clean_free_mb: int = 2000
     history_file: Path | None = None
+    vertical_positions_file: Path | None = None
+
+    def vertical_map_path(self) -> Path | None:
+        """Remembered 9:16 window positions, per source."""
+        if self.vertical_positions_file is not None:
+            return self.vertical_positions_file
+        if self.config_path is None:
+            return None
+        return self.config_path.parent / "vertical.json"
 
     def history_path(self) -> Path | None:
         """Where finished jobs are recorded (JSONL next to config.json)."""
@@ -159,6 +169,11 @@ def _from_mapping(data: dict[str, Any]) -> Config:
         auto_clean_free_mb=int(merged["auto_clean_free_mb"]),
         history_file=(
             Path(str(merged["history_file"])).expanduser() if merged["history_file"] else None
+        ),
+        vertical_positions_file=(
+            Path(str(merged["vertical_positions_file"])).expanduser()
+            if merged["vertical_positions_file"]
+            else None
         ),
         gui_port=int(merged["gui_port"]),
         log_file=Path(str(merged["log_file"])).expanduser(),

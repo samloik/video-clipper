@@ -158,6 +158,37 @@ def make_room(dirs: list[Path], target_mb: float) -> "SweepResult":
     return SweepResult(removed=removed, freed_bytes=freed)
 
 
+def load_positions(path: Path | None) -> dict[str, float]:
+    """Remembered horizontal positions of the 9:16 window, keyed by source."""
+    if path is None or not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    out: dict[str, float] = {}
+    for key, value in data.items():
+        try:
+            out[str(key)] = min(1.0, max(0.0, float(value)))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def save_position(path: Path | None, source: str, horizontal: float) -> None:
+    if path is None or not source:
+        return
+    data = load_positions(path)
+    data[source] = min(1.0, max(0.0, float(horizontal)))
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError:
+        log.warning("Не смог сохранить позицию кадра в %s", path)
+
+
 def record_history(path: Path | None, entry: dict) -> None:
     """Append one finished job to the JSONL history (best effort)."""
     if path is None:

@@ -10,5 +10,6 @@ cache/
 config.json
 retention.txt
 history.jsonl
+vertical.json
 cookies*.txt
 .pytest_cache/

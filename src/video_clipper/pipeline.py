@@ -48,6 +48,9 @@ def run_pipeline(args: Any, cfg: Config) -> list[ClipResult]:
     fast = bool(getattr(args, "fast", False))
     vertical = bool(getattr(args, "vertical", False) or getattr(args, "blur", False))
     layout = "blur" if bool(getattr(args, "blur", False)) else "crop"
+    horizontal = 0.5
+    if getattr(args, "krop", None) is not None:
+        horizontal = max(0.0, min(1.0, float(args.krop) / 100))
     dry_run = bool(getattr(args, "dry_run", False))
     keep_source = bool(getattr(args, "keep_source", False)) or cfg.keep_source
     source_value = str(args.source)
@@ -112,7 +115,7 @@ def run_pipeline(args: Any, cfg: Config) -> list[ClipResult]:
             shown = original_segments[i] if i < len(original_segments) else seg
             name = args.name if (getattr(args, "name", None) and len(segments) == 1) else None
             out_path = out_dir / vertical_name(
-                clip_filename(src.title, source_value, shown, name), vertical, layout
+                clip_filename(src.title, source_value, shown, name), vertical, layout, horizontal
             )
             result = cut_segment(
                 str(src.path),
@@ -126,6 +129,7 @@ def run_pipeline(args: Any, cfg: Config) -> list[ClipResult]:
                 vertical_size=pick_vertical_size(
                     src.info.height, cfg.vertical_width, cfg.vertical_height
                 ),
+                horizontal=horizontal,
             )
             result.segment = shown
             results.append(result)

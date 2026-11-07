@@ -12,6 +12,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import secrets
 import shutil
 import threading
@@ -23,10 +24,10 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import quote, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from .config import Config, apply_retention_override, load_config
-from .cut import ClipResult, CutCancelled
+from .cut import ClipResult, CutCancelled, clamp_horizontal
 from .probe import EnvironmentProblem, check_tools
 from .segments import (
     Segment,
@@ -319,6 +320,13 @@ input::placeholder{color:#78818e}
 .switch em{display:block;font-style:normal;font-size:12px;color:var(--ink-3);margin-top:1px}
 .layout-choice{display:flex;flex-wrap:wrap;align-items:center;gap:7px;padding:0 0 8px 47px}
 .layout-choice span{font-size:12px;color:var(--ink-3);margin-right:2px}
+.crop-pos{display:flex;align-items:center;gap:9px;padding:0 0 10px 47px}
+.crop-pos[hidden]{display:none}
+.crop-pos span{font-size:12px;color:var(--ink-3)}
+.crop-pos input[type=range]{flex:1;min-width:60px;accent-color:var(--accent);height:26px;
+  background:transparent;border:0}
+.crop-pos .ghost{min-height:28px;padding:3px 9px;font-size:11.5px;border-radius:7px}
+.crop-pos .mono{font-size:12px;color:var(--ink-2);min-width:38px;text-align:right}
 .seg{border:1px solid var(--line);background:transparent;color:var(--ink-2);
   border-radius:7px;padding:7px 11px;font-size:12.5px;cursor:pointer;min-height:34px}
 .seg:hover{border-color:var(--line-2);color:var(--ink)}
@@ -489,6 +497,13 @@ input::placeholder{color:#78818e}
         <span>фон:</span>
         <button type="button" class="seg on" data-layout="crop">обрезать бока</button>
         <button type="button" class="seg" data-layout="blur">размытый фон</button>
+      </div>
+      <div class="crop-pos" id="crop-pos" hidden>
+        <span class="crop-label">окно:</span>
+        <input id="krop" type="range" min="0" max="100" step="1" value="50"
+               aria-label="Положение окна 9:16 по горизонтали">
+        <span class="mono" id="krop-val">50%</span>
+        <button type="button" class="ghost" id="krop-auto">авто</button>
       </div>
     </div>
 
@@ -742,7 +757,59 @@ function renderProgress(job) {
 }
 
 const choiceEl = $('layout-choice');
-$('vertical').addEventListener('change', (e) => { choiceEl.hidden = !e.target.checked; });
+const cropPosEl = $('crop-pos'), kropEl = $('krop'), kropValEl = $('krop-val');
+
+$('vertical').addEventListener('change', (e) => {
+  choiceEl.hidden = !e.target.checked;
+  cropPosEl.hidden = !e.target.checked;
+});
+function setKrop(percent) {
+  const value = Math.max(0, Math.min(100, Math.round(percent)));
+  kropEl.value = String(value);
+  kropValEl.textContent = value + '%';
+}
+kropEl.addEventListener('input', () => setKrop(Number(kropEl.value)));
+
+function currentSource() {
+  return (urlEl.value.trim() || uploadedPath || '');
+}
+
+let kropTimer = null;
+async function loadKrop() {
+  const source = currentSource();
+  clearTimeout(kropTimer);
+  if (!source) { setKrop(50); return; }
+  kropTimer = setTimeout(async () => {
+    try {
+      const res = await fetch('/api/vertical?source=' + encodeURIComponent(source));
+      const data = await res.json();
+      if (currentSource() !== source) return;      // пока грузили, источник сменили
+      setKrop((data.horizontal ?? 0.5) * 100);
+      if (data.saved) setStatus('Для этого источника запомнено положение окна ' +
+        Math.round(data.horizontal * 100) + '%');
+    } catch (err) { /* позиция не критична */ }
+  }, 500);
+}
+urlEl.addEventListener('input', loadKrop);
+
+$('krop-auto').addEventListener('click', async () => {
+  const source = currentSource();
+  if (!source) { setStatus('Сначала выбери файл или ссылку', 'err'); return; }
+  const button = $('krop-auto');
+  button.disabled = true;
+  button.textContent = 'смотрю…';
+  try {
+    const res = await fetch('/api/vertical/auto?source=' + encodeURIComponent(source));
+    const data = await res.json();
+    setKrop((data.horizontal ?? 0.5) * 100);
+    setStatus(data.note || 'позиция подобрана');
+  } catch (err) {
+    setStatus('авто не сработало: ' + err.message, 'err');
+  } finally {
+    button.disabled = false;
+    button.textContent = 'авто';
+  }
+});
 document.querySelectorAll('.seg').forEach(btn => {
   btn.addEventListener('click', () => {
     layout = btn.dataset.layout;
@@ -930,7 +997,8 @@ async function run() {
     segments,
     fast: $('fast').checked,
     vertical: $('vertical').checked,
-    layout: $('vertical').checked ? layout : 'crop'
+    layout: $('vertical').checked ? layout : 'crop',
+    horizontal: $('vertical').checked ? Number(kropEl.value) / 100 : 0.5
   };
   goBtn.disabled = true; goBtn.textContent = 'Режу…';
   setStatus('Ставлю задание в очередь', 'busy');
@@ -940,6 +1008,13 @@ async function run() {
     const res = await fetch('/api/clip', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body) });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'не удалось запустить');
+    if (body.vertical) {
+      // запомним выбранное окно для этого источника — в следующий раз подставится
+      fetch('/api/vertical', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ source, horizontal: body.horizontal })
+      }).catch(() => {});
+    }
     await poll(data.job_id);
   } catch (err) {
     setStatus(err.message, 'err');
@@ -1108,6 +1183,76 @@ def _job_control(job_id: str) -> "JobControl | None":
         return control if isinstance(control, JobControl) else None
 
 
+def _saved_position(cfg: Config, source: str) -> float | None:
+    from .storage import load_positions
+
+    if not source:
+        return None
+    return load_positions(cfg.vertical_map_path()).get(source)
+
+
+def _remember_position(cfg: Config, source: str, horizontal: float) -> None:
+    from .cut import clamp_horizontal
+    from .storage import save_position
+
+    if source:
+        save_position(cfg.vertical_map_path(), source, clamp_horizontal(horizontal))
+
+
+def auto_horizontal(source: str, cfg: Config) -> tuple[float, str]:
+    """Find the 9:16 window by the content inside the frame (ignores black bars).
+
+    Works on a local file or an already cached download: pulling a fresh copy just
+    to look at one frame would cost more than the whole cut.
+    """
+    from .cut import clamp_horizontal
+    from .probe import probe_media
+    from .source import find_cached_source, is_url
+
+    if not source:
+        return 0.5, "сначала выбери файл или ссылку"
+    if is_url(source):
+        cached = find_cached_source(Path(cfg.cache_dir).expanduser(), source, cfg.retention_minutes)
+        if cached is None:
+            return 0.5, "ролик ещё не скачан — авто посмотрит его после первой нарезки"
+        path = cached
+    else:
+        path = Path(source).expanduser()
+    if not path.is_file():
+        return 0.5, "файл не найден"
+    try:
+        info = probe_media(str(path), cfg.ffprobe_path)
+    except Exception as exc:  # noqa: BLE001
+        return 0.5, f"не смог прочитать файл: {exc}"
+    if not info.width or not info.height:
+        return 0.5, "не знаю размеров кадра"
+    window_w = round(info.height * 9 / 16)
+    if window_w >= info.width:
+        return 0.5, "кадр и так уже 9:16 — центрировать нечего"
+    started = max(0.5, (info.duration or 0) * 0.3)
+    cmd = [
+        cfg.ffmpeg_path, "-hide_banner", "-nostdin", "-loglevel", "info",
+        "-ss", f"{started:.2f}", "-i", str(path), "-frames:v", "24",
+        "-vf", "cropdetect=24:2:0", "-f", "null", "-",
+    ]
+    try:
+        import subprocess
+
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60, check=False)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return 0.5, f"ffmpeg не смог посмотреть кадр: {exc}"
+    matches = re.findall(r"crop=(\d+):(\d+):(\d+):(\d+)", proc.stderr or "")
+    if not matches:
+        return 0.5, "границы содержимого не разглядел — оставил центр"
+    width, _height, left, _top = (int(part) for part in matches[-1])
+    if width >= info.width - 2:
+        return 0.5, "чёрных полей нет — окно по центру"
+    center = left + width / 2
+    span = info.width - window_w
+    position = clamp_horizontal((center - window_w / 2) / span if span > 0 else 0.5)
+    return position, f"содержимое {width}px с {left}px → окно {position * 100:.0f}%"
+
+
 def _free_mb(cfg: Config) -> float:
     from .storage import free_mb
 
@@ -1157,6 +1302,19 @@ def _estimate(
     return work * 0.55, work * 1.7
 
 
+def _call_clipper(clipper: Callable[..., list[ClipResult]], args: tuple, variants: list[dict]):
+    """Try richer keyword sets first; a clipper that predates them gets fewer."""
+    last_error: TypeError | None = None
+    for kwargs in variants:
+        clean = {key: value for key, value in kwargs.items() if value is not None}
+        try:
+            return clipper(*args, **clean)
+        except TypeError as exc:
+            last_error = exc
+            continue
+    raise last_error if last_error is not None else RuntimeError("clipper не ответил")
+
+
 def _run_job(
     job_id: str,
     source: str,
@@ -1166,6 +1324,7 @@ def _run_job(
     clipper: Callable[..., list[ClipResult]],
     vertical: bool = False,
     layout: str = "crop",
+    horizontal: float = 0.5,
 ) -> None:
     control = _job_control(job_id)
     started = time.monotonic()
@@ -1261,27 +1420,22 @@ def _run_job(
                 _job_update(job_id, detail=detail, message=f"{word} · {detail}")
 
         threading.Thread(target=heartbeat, daemon=True).start()
-        try:
-            results = clipper(
-                source,
-                segments,
-                fast,
-                cfg,
-                progress,
-                vertical=vertical,
-                layout=layout,
-                control=control,
-            )
-        except TypeError:  # a custom clipper without these keyword arguments (tests)
-            try:
-                results = clipper(
-                    source, segments, fast, cfg, progress, vertical=vertical, layout=layout
-                )
-            except TypeError:
-                try:
-                    results = clipper(source, segments, fast, cfg, progress, vertical=vertical)
-                except TypeError:
-                    results = clipper(source, segments, fast, cfg, progress)
+        results = _call_clipper(
+            clipper,
+            (source, segments, fast, cfg, progress),
+            [
+                {
+                    "vertical": vertical,
+                    "layout": layout,
+                    "control": control,
+                    "horizontal": horizontal,
+                },
+                {"vertical": vertical, "layout": layout, "control": control},
+                {"vertical": vertical, "layout": layout},
+                {"vertical": vertical},
+                {},
+            ],
+        )
         if control is not None and control.is_set():
             finish(state="cancelled", error="Остановлено", error_details="", message="")
             return
@@ -1324,6 +1478,7 @@ def default_clipper(
     vertical: bool = False,
     layout: str = "crop",
     control: "JobControl | None" = None,
+    horizontal: float = 0.5,
 ) -> list[ClipResult]:
     """Download (if needed), validate and cut — the same path the CLI uses."""
     from .cut import cut_segment, pick_vertical_size, vertical_name
@@ -1367,7 +1522,9 @@ def default_clipper(
             result = cut_segment(
                 str(src.path),
                 out_dir
-                / vertical_name(clip_filename(src.title, source, shown), vertical, layout),
+                / vertical_name(
+                    clip_filename(src.title, source, shown), vertical, layout, horizontal
+                ),
                 seg,
                 fast=fast,
                 ffmpeg_path=cfg.ffmpeg_path,
@@ -1380,6 +1537,7 @@ def default_clipper(
                 progress=clip_progress,
                 cancel=control,
                 on_process=control.register if control is not None else None,
+                horizontal=horizontal,
             )
             result.segment = shown
             results.append(result)
@@ -1488,6 +1646,9 @@ GUI_HELP = """Как пользоваться
      может уехать до ближайшего ключевого кадра.
   «вертикально 9:16» — кадр под смартфон, фон на выбор: обрезать бока или размытый.
      Источник 720p остаётся 720×1280 — без апскейла и мыла.
+     Ползунок «окно» двигает кадр по горизонтали (0% слева, 50% центр, 100% справа),
+     кнопка «авто» ищет содержимое без чёрных полей и ставит окно на него.
+     Позиция запоминается для источника: в следующей нарезке подставится сама.
 
 Хранение
   Файл до {max_upload} ГБ. Скачанные оригиналы и готовые клипы живут {retention} после
@@ -1668,6 +1829,23 @@ def make_handler(
             if path == "/api/status":
                 self._send(200, _dumps({"text": status_text(cfg)}))
                 return
+            if path in ("/api/vertical", "/api/vertical/auto"):
+                source = (parse_qs(urlparse(self.path).query).get("source") or [""])[0]
+                if path == "/api/vertical/auto":
+                    position, note = auto_horizontal(source, cfg)
+                    self._send(200, _dumps({"horizontal": position, "note": note}))
+                    return
+                saved = _saved_position(cfg, source)
+                self._send(
+                    200,
+                    _dumps(
+                        {
+                            "horizontal": 0.5 if saved is None else saved,
+                            "saved": saved is not None,
+                        }
+                    ),
+                )
+                return
             if path == "/api/retention":
                 from .timecode import format_retention
 
@@ -1783,6 +1961,21 @@ def make_handler(
                 self._send(200, _dumps({"state": "cancelling"}))
                 return
 
+            if parsed.path == "/api/vertical":
+                try:
+                    data = json.loads(body or b"{}")
+                except json.JSONDecodeError:
+                    self._error(400, "ожидается JSON")
+                    return
+                source = str(data.get("source") or "").strip()
+                if not source:
+                    self._error(400, "не указан источник")
+                    return
+                position = clamp_horizontal(data.get("horizontal", 0.5))
+                _remember_position(cfg, source, position)
+                self._send(200, _dumps({"horizontal": position, "saved": True}))
+                return
+
             if parsed.path == "/api/retention":
                 from .timecode import format_retention, parse_retention
 
@@ -1856,6 +2049,7 @@ def make_handler(
                     layout = str(data.get("layout") or "crop")
                     if layout not in ("crop", "blur"):
                         layout = "crop"
+                    horizontal = clamp_horizontal(data.get("horizontal", 0.5))
                 except ValueError as exc:
                     self._error(400, str(exc))
                     return
@@ -1874,6 +2068,7 @@ def make_handler(
                         clipper,
                         vertical,
                         layout,
+                        horizontal,
                     ),
                     daemon=True,
                 ).start()

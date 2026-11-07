@@ -17,6 +17,7 @@ from video_clipper.bot import (
     describe_request,
     estimate_seconds,
     handle_message,
+    parse_horizontal,
     parse_request,
     split_long,
 )
@@ -179,6 +180,22 @@ class TestErrorContext:
         assert "Отрезок:" in text and "Режим:" in text
         assert "Ошибка: Секционная загрузка отклонена сайтом" in text
         assert "9:16" in text
+
+
+class TestHorizontalWord:
+    def test_parse_position_from_words(self):
+        assert parse_request("https://youtu.be/ID вертикально сместить 30").horizontal == 0.3
+        assert parse_request("https://youtu.be/ID вертикально окно 70%").horizontal == 0.7
+        assert parse_request("https://youtu.be/ID вертикально кроп 0").horizontal == 0.0
+        assert parse_request("https://youtu.be/ID вертикально").horizontal == 0.5
+
+    def test_out_of_range_is_clamped(self):
+        assert parse_horizontal("сместить 900") == 1.0
+
+    def test_description_mentions_the_window(self):
+        request = parse_request("https://youtu.be/ID вертикально сместить 30")
+        text = describe_request(request)
+        assert "окно 30%" in text
 
 
 class TestVerticalProgress:
@@ -758,7 +775,8 @@ def make_clipper(tmp_path: Path):
 
 
 def fake_clip_for_bot(tmp_path):
-    def _inner(source, segments, fast, cfg, vertical=False, layout="crop", progress=None):
+    def _inner(source, segments, fast, cfg, vertical=False, layout="crop", progress=None,
+               horizontal=0.5):
         out = tmp_path / "out" / "clip.mp4"
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_bytes(b"mp4")
@@ -780,6 +798,7 @@ def fake_clip_for_bot(tmp_path):
             "source": source,
             "vertical": vertical,
             "layout": layout,
+            "horizontal": horizontal,
             "created": time.time(),
         }
         return results, job
@@ -818,7 +837,8 @@ class TestFastButton:
 
         seen = {}
 
-        def fake(source, segments, fast, cfg, vertical=False, layout="crop", progress=None):
+        def fake(source, segments, fast, cfg, vertical=False, layout="crop", progress=None,
+                 horizontal=0.5):
             seen["vertical"] = vertical
             return fake_clip_for_bot(tmp_path)(source, segments, fast, cfg)[0], {
                 "path": str(tmp_path / "out" / "clip.mp4"),
@@ -924,7 +944,8 @@ class TestWholeVideo:
 
         seen = {}
 
-        def fake(source, segments, fast, cfg, vertical=False, layout="crop", progress=None):
+        def fake(source, segments, fast, cfg, vertical=False, layout="crop", progress=None,
+                 horizontal=0.5):
             seen["segments"] = list(segments)
             out = tmp_path / "out" / "whole.mp4"
             out.parent.mkdir(parents=True, exist_ok=True)

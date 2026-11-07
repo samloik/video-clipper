@@ -10,6 +10,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+from urllib.parse import quote
 
 import pytest
 
@@ -527,6 +528,99 @@ class TestDiskAndHistory:
         assert old in result.removed
         assert result.freed_bytes >= 4096
         assert not old.exists()
+
+
+class TestVerticalWindow:
+    def test_position_is_remembered_per_source(self, server_factory, cfg, tmp_path):
+        base = server_factory(fake_clipper(tmp_path / "c.mp4"))
+        source = "https://youtu.be/ID"
+        status, body = get(base, "/api/vertical?source=" + quote(source, safe=""))
+        assert status == 200
+        data = json.loads(body)
+        assert data == {"horizontal": 0.5, "saved": False}
+
+        status, body, _ = _get(base + "/api/vertical", method="POST",
+                               data=json.dumps({"source": source, "horizontal": 0.72}).encode(),
+                               headers={"Content-Type": "application/json"})
+        assert status == 200 and json.loads(body)["horizontal"] == 0.72
+
+        status, body = get(base, "/api/vertical?source=" + quote(source, safe=""))
+        assert json.loads(body)["horizontal"] == pytest.approx(0.72)
+        assert json.loads(body)["saved"] is True
+        assert "0.72" in cfg.vertical_map_path().read_text(encoding="utf-8")
+
+    def test_position_reaches_the_clipper(self, server_factory, tmp_path):
+        seen = {}
+
+        def clipper(source, segments, fast, cfg, progress=None, vertical=False,
+                    layout="crop", control=None, horizontal=0.5):
+            seen["horizontal"] = horizontal
+            return []
+
+        base = server_factory(clipper)
+        media = tmp_path / "v.mp4"
+        media.write_bytes(b"x")
+        status, body = post_json(base, "/api/clip", {
+            "source": str(media), "segments": [{"start": "0:00", "end": "0:02"}],
+            "vertical": True, "horizontal": 0.3,
+        })
+        assert status == 202
+        for _ in range(60):
+            job = json.loads(get(base, f"/api/jobs/{body['job_id']}")[1])
+            if job["state"] != "running":
+                break
+            time.sleep(0.05)
+        assert seen["horizontal"] == pytest.approx(0.3)
+
+    def test_garbage_position_falls_back_to_centre(self, server_factory, tmp_path):
+        seen = {}
+
+        def clipper(source, segments, fast, cfg, progress=None, vertical=False,
+                    layout="crop", control=None, horizontal=0.5):
+            seen["horizontal"] = horizontal
+            return []
+
+        base = server_factory(clipper)
+        media = tmp_path / "v.mp4"
+        media.write_bytes(b"x")
+        post_json(base, "/api/clip", {
+            "source": str(media), "segments": [{"start": "0:00", "end": "0:01"}],
+            "vertical": True, "horizontal": "abc",
+        })
+        time.sleep(0.3)
+        assert seen["horizontal"] == 0.5
+
+    def test_auto_finds_content_behind_black_bars(self, server_factory, cfg, tmp_path):
+        if subprocess.run(["which", "ffmpeg"], capture_output=True).returncode != 0:
+            pytest.skip("нужен ffmpeg")
+        source = tmp_path / "bars.mp4"
+        # содержимое 480px прижато вправо, слева чёрные поля
+        subprocess.run([
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "lavfi", "-i", "testsrc2=size=480x720:rate=25:duration=4",
+            "-vf", "pad=1280:720:800:0:black", "-c:v", "libx264", "-preset", "ultrafast",
+            "-pix_fmt", "yuv420p", str(source),
+        ], check=True)
+        base = server_factory(fake_clipper(tmp_path / "c.mp4"))
+        status, body = get(base, "/api/vertical/auto?source=" + quote(str(source), safe=""))
+        assert status == 200
+        data = json.loads(body)
+        assert data["horizontal"] > 0.65, data
+        assert data["horizontal"] <= 1.0
+        assert "содержимое" in data["note"] or "полей" in data["note"]
+
+    def test_auto_without_cached_download_stays_centred(self, server_factory, tmp_path):
+        base = server_factory(fake_clipper(tmp_path / "c.mp4"))
+        status, body = get(base, "/api/vertical/auto?source=" + quote("https://youtu.be/ID", safe=""))
+        data = json.loads(body)
+        assert status == 200 and data["horizontal"] == 0.5
+        assert "не скачан" in data["note"]
+
+    def test_page_has_the_slider(self):
+        from video_clipper.gui import PAGE
+
+        assert 'id="krop"' in PAGE and 'id="krop-auto"' in PAGE
+        assert "/api/vertical" in PAGE
 
 
 class TestProgressHeartbeat:

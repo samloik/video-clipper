@@ -31,9 +31,11 @@ VERTICAL_SIZE = (1080, 1920)
 # "cover": scale so the frame fills 1080x1920, then crop the overflow — the usual
 # centre crop for Shorts/Reels. "blur": fit the whole frame, back it with a
 # blurred, cropped copy. Both keep the SAR at 1 so phones do not letterbox.
+# ``x`` — доля свободного хода окна по горизонтали: 0 — прижать влево, 0.5 — центр,
+# 1 — вправо. Нужно, когда человек в кадре стоит не по центру.
 VERTICAL_CROP_FILTER = (
     "scale={w}:{h}:force_original_aspect_ratio=increase,"
-    "crop={w}:{h},setsar=1"
+    "crop={w}:{h}:(iw-{w})*{x}:(ih-{h})/2,setsar=1"
 )
 # The backdrop is blurred anyway, so it is built at 1/4 size and scaled up:
 # gblur at 1080x1920 costs minutes per clip on a small VM, at 270x480 — seconds,
@@ -44,7 +46,7 @@ VERTICAL_BLUR_FILTER = (
     "[0:v]scale={bw}:{bh}:force_original_aspect_ratio=increase,crop={bw}:{bh},"
     "gblur=sigma=8,scale={w}:{h}[bg];"
     "[0:v]scale={w}:{h}:force_original_aspect_ratio=decrease[fg];"
-    "[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1"
+    "[bg][fg]overlay=(W-w)*{x}:(H-h)/2,setsar=1"
 )
 
 
@@ -59,18 +61,40 @@ def pick_vertical_size(source_height: int | None, width: int = 1080, height: int
     return (width, height)
 
 
-def vertical_name(filename: str, vertical: bool, layout: str = "crop") -> str:
+def vertical_name(
+    filename: str, vertical: bool, layout: str = "crop", horizontal: float = 0.5
+) -> str:
     """Mark the variant in the file name so both versions can coexist."""
     if not vertical:
         return filename
     suffix = "_vertical_blur" if layout == "blur" else "_vertical"
+    position = clamp_horizontal(horizontal)
+    if abs(position - 0.5) >= 0.005:
+        # разные окна одного клипа не должны затирать друг друга
+        suffix += f"_krop{round(position * 100)}"
     stem = filename[:-4] if filename.lower().endswith(".mp4") else filename
     return f"{stem}{suffix}.mp4"
 
 
-def vertical_args(layout: str = "crop", size: tuple[int, int] = VERTICAL_SIZE) -> list[str]:
+def clamp_horizontal(value: float | None) -> float:
+    """Where the 9:16 window sits: 0 — left edge, 0.5 — centre, 1 — right edge."""
+    try:
+        number = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0.5
+    if number != number:  # NaN
+        return 0.5
+    return min(1.0, max(0.0, number))
+
+
+def vertical_args(
+    layout: str = "crop",
+    size: tuple[int, int] = VERTICAL_SIZE,
+    horizontal: float = 0.5,
+) -> list[str]:
     """ffmpeg video-filter arguments for a 9:16 frame."""
     width, height = size
+    x = f"{clamp_horizontal(horizontal):.4f}"
     if layout == "blur":
         return [
             "-filter_complex",
@@ -79,9 +103,10 @@ def vertical_args(layout: str = "crop", size: tuple[int, int] = VERTICAL_SIZE) -
                 h=height,
                 bw=max(2, width // BLUR_BG_SCALE) // 2 * 2,
                 bh=max(2, height // BLUR_BG_SCALE) // 2 * 2,
+                x=x,
             ),
         ]
-    return ["-vf", VERTICAL_CROP_FILTER.format(w=width, h=height)]
+    return ["-vf", VERTICAL_CROP_FILTER.format(w=width, h=height, x=x)]
 
 
 class CutError(RuntimeError):
@@ -119,6 +144,7 @@ def build_ffmpeg_command(
     vertical: bool = False,
     layout: str = "crop",
     vertical_size: tuple[int, int] = VERTICAL_SIZE,
+    horizontal: float = 0.5,
 ) -> list[str]:
     """Build the ffmpeg argv for one segment.
 
@@ -141,7 +167,7 @@ def build_ffmpeg_command(
         # Vertical mode always re-encodes: cropping cannot be stream-copied.
         cmd += ACCURATE_VIDEO_ARGS
         if vertical:
-            cmd += vertical_args(layout, vertical_size)
+            cmd += vertical_args(layout, vertical_size, horizontal)
         cmd += ACCURATE_AUDIO_ARGS if has_audio else ["-an"]
         # Re-encoded output may start at a negative PTS offset; zero it.
         # With -c copy this option inflates the duration by the seek offset,
@@ -392,6 +418,7 @@ def cut_segment(
     progress: Callable[[str, float | None, str], None] | None = None,
     cancel: Any = None,
     on_process: Callable[[Any], None] | None = None,
+    horizontal: float = 0.5,
 ) -> ClipResult:
     """Run ffmpeg for one segment and return the result."""
     out_path = Path(out)
@@ -406,6 +433,7 @@ def cut_segment(
         vertical=vertical,
         layout=layout,
         vertical_size=vertical_size,
+        horizontal=horizontal,
     )
     mode = "fast" if fast and not vertical else "accurate"
     if vertical:
