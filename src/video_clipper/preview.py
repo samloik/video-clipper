@@ -24,6 +24,7 @@ from .storage import find_cached_source, video_id_from_url
 log = logging.getLogger(__name__)
 
 FRAME_TIMEOUT = 25
+STREAM_FRAME_TIMEOUT = 22  # один заход за кадром из потока; всего их два
 STREAM_TTL = 600
 
 # Кадры кэшируем: при быстром перелистывании границы один и тот же кадр
@@ -277,29 +278,51 @@ def cached_stream(source: str) -> dict:
 
 
 def grab_stream_frame(source: str, cfg: Config, seconds: float, width: int = 480) -> bytes:
-    """Кадр из потока: ffmpeg читает только нужный кусок через HTTP Range."""
+    """Кадр из потока: ffmpeg читает только нужный кусок через HTTP Range.
+
+    CDN иногда отвечает медленно, и один заход не укладывается в отведённое время.
+    Тогда берём свежий адрес потока и пробуем ещё раз: адрес на CDN живёт часами,
+    но конкретный запрос может «подвиснуть» на прокси.
+    """
     from .httpproxy import HttpBridge
 
-    url, meta = stream_info(source, cfg)
-    bridge = None
-    saved = {k: os.environ.get(k) for k in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY")}
-    try:
-        if cfg.proxy:
-            bridge = HttpBridge(cfg.proxy)
-            bridge_url = bridge.start()
-            for key in saved:
-                os.environ[key] = bridge_url
-        return _frame_bytes(
-            url, seconds, width, cache_key=source, user_agent=meta.get("user_agent", "")
-        )
-    finally:
-        for key, value in saved.items():
-            if value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = value
-        if bridge is not None:
-            bridge.stop()
+    def _attempt() -> bytes:
+        url, meta = stream_info(source, cfg)
+        bridge = None
+        saved = {
+            k: os.environ.get(k)
+            for k in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY")
+        }
+        try:
+            if cfg.proxy:
+                bridge = HttpBridge(cfg.proxy)
+                bridge_url = bridge.start()
+                for key in saved:
+                    os.environ[key] = bridge_url
+            return _frame_bytes(
+                url,
+                seconds,
+                width,
+                cache_key=source,
+                user_agent=meta.get("user_agent", ""),
+                timeout=STREAM_FRAME_TIMEOUT,
+            )
+        finally:
+            for key, value in saved.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+            if bridge is not None:
+                bridge.stop()
+
+    frame = _attempt()
+    if not frame:
+        # запрос мог просто не успеть — обновляем адрес и пробуем второй раз
+        _STREAM_CACHE.pop(source, None)
+        log.info("Кадр из потока не пришёл с первого раза, повторяю: %s", source[:60])
+        frame = _attempt()
+    return frame
 
 
 def probe_media(path: Path) -> dict:
@@ -344,6 +367,7 @@ def _frame_bytes(
     width: int = 480,
     cache_key: str | None = None,
     user_agent: str = "",
+    timeout: float | None = None,
 ) -> bytes:
     key = cache_key or target
     seconds = max(0.0, float(seconds))
@@ -359,7 +383,9 @@ def _frame_bytes(
     ]
     try:
         with _frame_slots:
-            out = subprocess.run(cmd, capture_output=True, timeout=FRAME_TIMEOUT)
+            out = subprocess.run(
+                cmd, capture_output=True, timeout=timeout or FRAME_TIMEOUT
+            )
     except (OSError, subprocess.SubprocessError) as exc:
         log.info("Кадр не получился (%s, %.2f с): %s", target[:80], seconds, exc)
         return b""

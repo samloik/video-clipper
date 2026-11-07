@@ -565,6 +565,44 @@ class TestDiskAndHistory:
         assert not old.exists()
 
 
+class TestStreamFallback:
+    """Поток не отдал кадр — сервис сам готовит короткий участок, без кнопки."""
+
+    def test_frame_is_taken_from_a_downloaded_window(self, server_factory, cfg, monkeypatch):
+        import video_clipper.gui as gui_module
+
+        monkeypatch.setattr(
+            gui_module, "_remote_media",
+            lambda source, cfg_: {"duration": 63.0, "needs_download": True, "window": False,
+                                  "link_problem": ""},
+        )
+        monkeypatch.setattr(gui_module, "_stream_frame",
+                            lambda source, cfg_, seconds, width: (b"", "кадр из потока не пришёл вовремя"))
+        monkeypatch.setattr(gui_module, "_frame_from_window",
+                            lambda source, cfg_, seconds, width: b"\xff\xd8window")
+        base = server_factory(fake_clipper(cfg.cache_dir / "c.mp4"))
+        status, body, headers = _get(base + "/api/frame?source=https://youtu.be/SSSSSSSSSSS&t=30")
+        assert status == 200
+        assert headers.get("Content-Type") == "image/jpeg"
+        assert body == b"\xff\xd8window"
+
+    def test_timeout_does_not_freeze_the_source(self, cfg, monkeypatch):
+        import video_clipper.gui as gui_module
+
+        calls = []
+        monkeypatch.setattr(
+            gui_module, "grab_stream_frame",
+            lambda source, cfg_, seconds, width: (calls.append(seconds), b"")[1],
+        )
+        gui_module._STREAM_COOLDOWN.pop("https://youtu.be/COLD1", None)
+        first = gui_module._stream_frame("https://youtu.be/COLD1", cfg, 10.0, 240)
+        second = gui_module._stream_frame("https://youtu.be/COLD1", cfg, 12.0, 240)
+        assert first == (b"", "кадр из потока не пришёл вовремя")
+        assert second == (b"", "кадр из потока не пришёл вовремя")
+        assert calls == [10.0, 12.0], "после таймаута источник сразу пробуют снова"
+        assert "https://youtu.be/COLD1" not in gui_module._STREAM_COOLDOWN
+
+
 class TestPreviewForLinks:
     """Ссылка без скачанного файла: интерфейс должен предложить скачать короткий кусок."""
 
@@ -609,6 +647,8 @@ class TestPreviewForLinks:
             gui_module, "_stream_frame",
             lambda source, cfg_, seconds, width: (b"", "сайт не отдал кадр"),
         )
+        # участок тоже не скачивается (в тесте нет сети) — остаётся причина
+        monkeypatch.setattr(gui_module, "ensure_window", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("нет сети")))
         base = server_factory(fake_clipper(cfg.output_dir / "c.mp4"))
         status, body, _ = _get(
             base + "/api/frame?source=" + quote(self.URL, safe="") + "&t=5"
@@ -660,6 +700,7 @@ class TestPreviewForLinks:
             raise RuntimeError("ERROR: [youtube] Sign in to confirm you're not a bot")
 
         monkeypatch.setattr(gui_module, "grab_stream_frame", failing)
+        monkeypatch.setattr(gui_module, "ensure_window", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("нет сети")))
         monkeypatch.setattr(gui_module, "_STREAM_COOLDOWN", {})
         base = server_factory(fake_clipper(cfg.output_dir / "c.mp4"))
         url = base + "/api/frame?source=" + quote("https://rutube.ru/video/тест/", safe="")
@@ -672,6 +713,7 @@ class TestPreviewForLinks:
 
         error = RuntimeError("ERROR: [youtube:truncated_id] Incomplete YouTube ID -QQ5yL7tnq.")
         monkeypatch.setattr(gui_module, "_stream_frame", lambda *a: (b"", gui_module._preview_error(error)))
+        monkeypatch.setattr(gui_module, "ensure_window", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("нет сети")))
         base = server_factory(fake_clipper(cfg.output_dir / "c.mp4"))
         status, body, _ = _get(
             base + "/api/frame?source=" + quote(self.URL, safe="") + "&t=0"

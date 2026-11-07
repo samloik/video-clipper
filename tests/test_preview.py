@@ -229,6 +229,29 @@ class TestStream:
         stream_info(url, cfg)
         assert cached_stream(url)["duration"] == 3458.0
 
+    def test_slow_cdn_gets_a_second_try_with_a_fresh_url(self, tmp_path, monkeypatch):
+        """Медленный CDN — не приговор: второй заход берёт новый адрес потока."""
+        import video_clipper.preview as pv
+
+        seen = []
+
+        def fake_info(source, cfg):
+            seen.append("info")
+            return (f"https://cdn.example/{len(seen)}.mp4", {"user_agent": "ua"})
+
+        attempts = []
+
+        def fake_frame(target, seconds, width=480, cache_key=None, user_agent="", timeout=None):
+            attempts.append(target)
+            return b"" if len(attempts) == 1 else b"\xff\xd8jpeg"
+
+        monkeypatch.setattr(pv, "stream_info", fake_info)
+        monkeypatch.setattr(pv, "_frame_bytes", fake_frame)
+        frame = pv.grab_stream_frame("https://youtu.be/SLOW1", self._cfg(tmp_path), 5.0, 240)
+        assert frame == b"\xff\xd8jpeg"
+        assert len(attempts) == 2, "ровно одна повторная попытка"
+        assert attempts[0] != attempts[1], "повтор должен идти по свежему адресу"
+
     def test_missing_link_is_an_error(self, tmp_path, monkeypatch):
         import video_clipper.source as source_module
 

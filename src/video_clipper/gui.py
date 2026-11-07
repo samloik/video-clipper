@@ -55,7 +55,7 @@ from .segments import (
     resolve_open_ends,
     validate_segments,
 )
-from .source import is_url
+from .source import is_bot_check, is_url
 
 log = logging.getLogger("video_clipper")
 STARTED_AT = time.time()
@@ -1238,7 +1238,7 @@ function refreshThumbs() {
       previewNoteEl.textContent = error;
       return;
     }
-    offerWindowDownload(error ? 'кадров нет: ' + error : '');
+    offerWindowDownload(error || '');
   };
   if (beyond(startSec)) {
     $('note-start').textContent = '· за концом ролика (' + fmtTC(mediaInfo.duration) + ')';
@@ -1717,12 +1717,34 @@ def _stream_frame(source: str, cfg: Config, seconds: float, width: int):
     if time.time() < until:
         return b"", message
     try:
-        return grab_stream_frame(source, cfg, seconds, width), ""
+        frame = grab_stream_frame(source, cfg, seconds, width)
     except Exception as exc:  # noqa: BLE001 - сеть, бот-чек, битая ссылка
         log.info("Кадр из потока не получился: %s", exc)
         message = _preview_error(exc)
-        _STREAM_COOLDOWN[source] = (time.time() + STREAM_COOLDOWN_SECONDS, message)
+        # «остывание» имеет смысл только для настоящего запрета (бот-чек, приватное
+        # видео): медленный CDN — не повод 60 секунд не пробовать снова
+        if is_bot_check(exc) or "unavailable" in str(exc).lower():
+            _STREAM_COOLDOWN[source] = (time.time() + STREAM_COOLDOWN_SECONDS, message)
         return b"", message
+    if not frame:
+        return b"", "кадр из потока не пришёл вовремя"
+    return frame, ""
+
+
+def _frame_from_window(source: str, cfg: Config, seconds: float, width: int) -> bytes:
+    """Кадр из короткого скачанного участка — страховка, когда поток медленный."""
+    try:
+        ensure_window(source, cfg, seconds)
+    except Exception as exc:  # noqa: BLE001 - сеть, бот-чек, приватное видео
+        log.info("Участок для кадров не скачался: %s", exc)
+        return b""
+    resolved = resolve_for_time(source, cfg, seconds)
+    if resolved is None:
+        return b""
+    media, local_time = resolved[0], resolved[1]
+    if not _allowed_media(media, cfg):
+        return b""
+    return grab_frame(media, local_time, width)
 
 
 def _preview_error(exc: Exception) -> str:
@@ -2495,12 +2517,18 @@ def make_handler(
                                 {"X-Frame-Approx": "1"} if approx else None,
                             )
                             return
+                        # поток не дал кадр (медленный CDN): короткий участок качаем
+                        # сами, чтобы человеку не приходилось нажимать «скачать 20 с»
+                        frame = _frame_from_window(source, cfg, wanted, frame_width)
+                        if frame:
+                            self._send(200, frame, "image/jpeg")
+                            return
                         if reason:
                             self._error(409, reason)
                             return
                     self._error(
                         409,
-                        "кадров для этого места ещё нет: короткий участок не скачан",
+                        "кадр не получен — попробуй ещё раз или скачай короткий участок",
                     )
                     return
                 local, local_time, offset, window_end, is_window = resolved
