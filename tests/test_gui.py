@@ -229,6 +229,63 @@ class TestPageAndHealth:
             httpd.server_close()
 
 
+class TestServiceEndpoints:
+    def test_status_reports_files(self, server_factory, cfg, tmp_path):
+        (cfg.cache_dir).mkdir(parents=True, exist_ok=True)
+        (cfg.cache_dir / "a.mp4").write_bytes(b"x" * 1024)
+        base = server_factory(fake_clipper(tmp_path / "c.mp4"))
+        status, body = get(base, "/api/status")
+        assert status == 200
+        text = json.loads(body)["text"]
+        assert "оригиналы" in text and "клипы" in text
+        assert "слушаю" in text
+
+    def test_info_returns_the_memo(self, server_factory, tmp_path):
+        base = server_factory(fake_clipper(tmp_path / "c.mp4"))
+        status, body = get(base, "/api/info")
+        assert status == 200
+        text = json.loads(body)["text"]
+        assert "ВЕБ-ИНТЕРФЕЙС" in text and "/info" in text
+
+    def test_clean_removes_files(self, server_factory, cfg, tmp_path):
+        cfg.cache_dir.mkdir(parents=True, exist_ok=True)
+        (cfg.cache_dir / "a.mp4").write_bytes(b"x" * 2048)
+        cfg.output_dir.mkdir(parents=True, exist_ok=True)
+        (cfg.output_dir / "b.mp4").write_bytes(b"x" * 2048)
+        base = server_factory(fake_clipper(tmp_path / "c.mp4"))
+        status, body, _ = _get(base + "/api/clean", method="POST")
+        assert status == 200
+        assert "Удалено" in json.loads(body)["text"]
+        assert not (cfg.cache_dir / "a.mp4").exists()
+        assert not (cfg.output_dir / "b.mp4").exists()
+
+    def test_job_reports_progress_fraction(self, server_factory, tmp_path):
+        def clipper(source, segments, fast, cfg, progress=None, vertical=False, layout="crop"):
+            progress("encode", 0.5, "клип 1/1")
+            out = tmp_path / "out" / "p.mp4"
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_bytes(b"mp4")
+            return [
+                ClipResult(source=source, segment=segments[0], output_path=out,
+                           duration=1.0, mode="accurate", size_bytes=3)
+            ]
+
+        base = server_factory(clipper)
+        media = tmp_path / "v.mp4"
+        media.write_bytes(b"x")
+        status, body = post_json(
+            base, "/api/clip", {"source": str(media), "start": "0:00", "end": "0:02"}
+        )
+        assert status == 202
+        for _ in range(50):
+            job = json.loads(get(base, f"/api/jobs/{body['job_id']}")[1])
+            if job["state"] != "running":
+                break
+            time.sleep(0.05)
+        assert job["state"] == "done"
+        assert job["stage"] == "encode" and job["fraction"] == 0.5
+
+
 class TestClipApi:
     def test_blur_layout_reaches_the_clipper(self, server_factory, tmp_path):
         seen: dict = {}

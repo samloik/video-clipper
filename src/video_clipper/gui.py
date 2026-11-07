@@ -149,6 +149,22 @@ body{background:var(--bg);color:var(--ink);font:15px/1.5 var(--sans);
       padding:4px 10px;border-radius:999px;display:inline-flex;align-items:center;gap:7px}
 .chip i{width:6px;height:6px;border-radius:50%;background:var(--line-2);display:block}
 .chip.ok i{background:var(--ok)}
+.bar-actions{display:flex;align-items:center;gap:8px}
+.ghost{background:transparent;border:1px solid var(--line);color:var(--ink-2);
+  border-radius:8px;padding:7px 11px;font-size:12.5px;cursor:pointer;min-height:34px}
+.ghost:hover{border-color:var(--line-2);color:var(--ink)}
+.ghost:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.panel{border-bottom:1px solid var(--line);background:var(--panel);padding:14px 22px;
+  display:flex;gap:16px;align-items:flex-start}
+.panel pre{margin:0;flex:1;white-space:pre-wrap;font:12.5px/1.6 var(--mono);
+  color:var(--ink-2);max-height:38vh;overflow:auto}
+.progress{height:4px;border-radius:999px;background:var(--line);overflow:hidden}
+.progress[hidden]{display:none}
+.progress i{display:block;height:100%;width:0;background:var(--accent);
+  transition:width .25s linear}
+.progress.indeterminate i{width:35%;animation:slide 1.2s ease-in-out infinite}
+@keyframes slide{0%{margin-left:-35%}100%{margin-left:100%}}
+@media (prefers-reduced-motion:reduce){.progress.indeterminate i{animation:none;width:100%}}
 
 .grid{display:grid;grid-template-columns:minmax(320px,420px) minmax(0,1fr);
       min-height:0;overflow:hidden}
@@ -295,8 +311,18 @@ input::placeholder{color:#78818e}
 <body>
 <header class="bar">
   <div class="brand">video-clipper <span>· нарезка по таймкодам</span></div>
-  <div><span class="chip mono" id="svc"><i></i><span id="svc-text">проверяю связь</span></span></div>
+  <div class="bar-actions">
+    <span class="chip mono" id="svc"><i></i><span id="svc-text">проверяю связь</span></span>
+    <button class="ghost" id="btn-status" type="button">Статус</button>
+    <button class="ghost" id="btn-info" type="button">Справка</button>
+    <button class="ghost" id="btn-clean" type="button">Очистить</button>
+  </div>
 </header>
+
+<div class="panel" id="panel" hidden>
+  <pre id="panel-text"></pre>
+  <button class="ghost" id="panel-close" type="button">закрыть</button>
+</div>
 
 <main class="grid">
   <section class="col-form">
@@ -352,6 +378,7 @@ input::placeholder{color:#78818e}
       <span class="label">Результат</span>
       <span class="timer mono" id="timer"></span>
     </div>
+    <div class="progress" id="progress" hidden><i id="bar"></i></div>
     <div class="status" id="status">Ждёт задание</div>
     <ul class="results" id="results"></ul>
     <div class="empty" id="empty">
@@ -386,6 +413,59 @@ function setStatus(text, kind) {
     statusEl.append(dot);
   }
   statusEl.append(document.createTextNode(text));
+}
+
+const panelEl = $('panel'), panelText = $('panel-text');
+const progressEl = $('progress'), barEl = $('bar');
+let panelTimer = null;
+
+function showPanel(text) {
+  panelText.textContent = text;
+  panelEl.hidden = false;
+  clearTimeout(panelTimer);
+}
+function hidePanel() { panelEl.hidden = true; clearTimeout(panelTimer); }
+$('panel-close').addEventListener('click', hidePanel);
+
+async function openPanel(url, body) {
+  showPanel('Загружаю…');
+  try {
+    const res = await fetch(url, body ? { method: 'POST' } : undefined);
+    const data = await res.json();
+    showPanel(data.text || JSON.stringify(data, null, 2));
+  } catch (err) {
+    showPanel('Ошибка: ' + err.message);
+  }
+}
+$('btn-status').addEventListener('click', () => openPanel('/api/status'));
+$('btn-info').addEventListener('click', () => openPanel('/api/info'));
+$('btn-clean').addEventListener('click', async () => {
+  if (!confirm('Удалить все скачанные файлы и готовые клипы с этой машины?')) return;
+  showPanel('Удаляю…');
+  try {
+    const res = await fetch('/api/clean', { method: 'POST' });
+    const data = await res.json();
+    showPanel(data.text || 'готово');
+    resultsEl.innerHTML = '';
+    emptyEl.style.display = '';
+    setStatus('Файлы удалены');
+  } catch (err) {
+    showPanel('Ошибка: ' + err.message);
+  }
+});
+
+function renderProgress(job) {
+  const running = job.state === 'running';
+  progressEl.hidden = !running;
+  if (!running) { progressEl.classList.remove('indeterminate'); barEl.style.width = '0'; return; }
+  const fraction = typeof job.fraction === 'number' ? job.fraction : null;
+  if (fraction === null) {
+    progressEl.classList.add('indeterminate');
+    barEl.style.width = '';
+  } else {
+    progressEl.classList.remove('indeterminate');
+    barEl.style.width = Math.max(2, Math.round(fraction * 100)) + '%';
+  }
 }
 
 const choiceEl = $('layout-choice');
@@ -537,9 +617,16 @@ goBtn.addEventListener('click', run);
 async function poll(id) {
   for (;;) {
     const job = await (await fetch('/api/jobs/' + id)).json();
-    if (job.state === 'running') setStatus(job.message || 'Работаю…', 'busy');
-    if (job.state === 'error') { setStatus(job.error || 'ошибка', 'err'); return; }
+    renderProgress(job);
+    if (job.state === 'running') {
+      const percent = typeof job.fraction === 'number' ? ' · ' + Math.round(job.fraction * 100) + '%' : '';
+      const stage = { download: 'Скачиваю', encode: 'Кодирую' }[job.stage] || 'Работаю';
+      const detail = job.detail ? ' · ' + job.detail : '';
+      setStatus(stage + percent + detail, 'busy');
+    }
+    if (job.state === 'error') { renderProgress(job); setStatus(job.error || 'ошибка', 'err'); return; }
     if (job.state === 'done') {
+      renderProgress(job);
       setStatus('Готово · ' + plural(job.results.length, 'файл', 'файла', 'файлов'));
       job.results.forEach((r, i) => {
         const li = document.createElement('li');
@@ -583,7 +670,16 @@ _JOBS_LOCK = threading.Lock()
 def _new_job() -> str:
     job_id = uuid.uuid4().hex[:12]
     with _JOBS_LOCK:
-        JOBS[job_id] = {"state": "running", "results": [], "error": "", "message": "Подготовка...", "files": []}
+        JOBS[job_id] = {
+            "state": "running",
+            "results": [],
+            "error": "",
+            "message": "Подготовка...",
+            "stage": "",
+            "fraction": None,
+            "detail": "",
+            "files": [],
+        }
     return job_id
 
 
@@ -609,8 +705,23 @@ def _run_job(
     layout: str = "crop",
 ) -> None:
     try:
-        _job_update(job_id, message="Готовлю источник...")
-        progress = lambda msg: _job_update(job_id, message=msg)  # noqa: E731
+        _job_update(job_id, message="Готовлю источник...", stage="download", fraction=None)
+
+        def progress(*args) -> None:
+            """Accept both the bot-style (stage, fraction, detail) and a plain message."""
+            if len(args) == 1:
+                _job_update(job_id, message=str(args[0]))
+                return
+            stage = str(args[0]) if args else ""
+            fraction = args[1] if len(args) > 1 else None
+            detail = str(args[2]) if len(args) > 2 else ""
+            _job_update(
+                job_id,
+                stage=stage,
+                fraction=fraction,
+                detail=detail,
+                message=detail or {"download": "Скачиваю", "encode": "Кодирую"}.get(stage, stage),
+            )
         try:
             results = clipper(
                 source, segments, fast, cfg, progress, vertical=vertical, layout=layout
@@ -653,9 +764,18 @@ def default_clipper(
 
     if vertical and layout not in ("crop", "blur"):
         layout = "crop"
-    if progress:
-        progress("Подготовка источника...")
-    src = prepare_source(source, cfg, segments=[(s.start, s.end) for s in segments])
+
+    def report(stage: str, fraction: float | None = None, detail: str = "") -> None:
+        if progress:
+            progress(stage, fraction, detail)
+
+    report("download", None, "готовлю источник")
+    src = prepare_source(
+        source,
+        cfg,
+        segments=[(s.start, s.end) for s in segments],
+        progress=report,
+    )
     try:
         original_segments = segments
         segments = shift_segments(segments, src.offset)
@@ -665,8 +785,14 @@ def default_clipper(
         results = []
         for i, seg in enumerate(segments):
             shown = original_segments[i] if i < len(original_segments) else seg
-            if progress:
-                progress(f"Нарезка {shown.label}")
+            total = len(segments)
+            report("encode", 0.0, f"клип {i + 1}/{total}" if total > 1 else "")
+
+            def clip_progress(
+                stage: str, fraction: float | None, detail: str, _i: int = i, _total: int = total
+            ) -> None:
+                report(stage, fraction, f"клип {_i + 1}/{_total}" if _total > 1 else "")
+
             result = cut_segment(
                 str(src.path),
                 out_dir
@@ -680,12 +806,51 @@ def default_clipper(
                 vertical_size=pick_vertical_size(
                     src.info.height, cfg.vertical_width, cfg.vertical_height
                 ),
+                progress=clip_progress,
             )
             result.segment = shown
             results.append(result)
         return results
     finally:
         src.cleanup()
+
+
+def status_text(cfg: Config) -> str:
+    """Что лежит на машине — тот же ответ, что /status у бота."""
+    from .storage import describe
+
+    lines = []
+    for label, directory in (("оригиналы", cfg.cache_dir), ("клипы", cfg.output_dir)):
+        items = describe(Path(directory))
+        total = sum(item["size"] for item in items) / 1048576
+        lines.append(f"{label}: {len(items)} файл(ов), {total:.1f} МБ")
+        for item in items[:8]:
+            lines.append(f"  · {item['name']} — {item['age_minutes']} мин")
+    cookies = Path(cfg.cookies).expanduser() if cfg.cookies else None
+    if cookies and cookies.is_file():
+        age = (time.time() - cookies.stat().st_mtime) / 86400
+        lines.append(f"cookies: обновлены {age:.1f} дн. назад")
+    else:
+        lines.append("cookies: файла нет — YouTube может требовать авторизацию")
+    running = sum(1 for job in JOBS.values() if job.get("state") == "running")
+    lines.append(f"в работе: {running} задание(й)")
+    lines.append(f"хранение: {cfg.retention_minutes} мин тишины")
+    lines.append(f"слушаю: {cfg.gui_host}:{cfg.gui_port}")
+    return "\n".join(lines)
+
+
+def info_text(cfg: Config) -> str:
+    """Та же памятка, что бот отдаёт по /info."""
+    from .bot import build_info
+
+    return build_info(cfg)
+
+
+def clean_text(cfg: Config) -> str:
+    from .storage import sweep
+
+    result = sweep([cfg.cache_dir, Path(cfg.output_dir)], minutes=0)
+    return f"Удалено {result.count} файл(ов), {result.freed_bytes / 1048576:.1f} МБ"
 
 
 def _dumps(payload: Any) -> bytes:
@@ -799,6 +964,12 @@ def make_handler(
             if path in ("/", "/index.html"):
                 self._send(200, PAGE.encode("utf-8"), "text/html; charset=utf-8")
                 return
+            if path == "/api/status":
+                self._send(200, _dumps({"text": status_text(cfg)}))
+                return
+            if path == "/api/info":
+                self._send(200, _dumps({"text": info_text(cfg)}))
+                return
             if path.startswith("/api/jobs/"):
                 job_id = path.rsplit("/", 1)[-1]
                 job = _job_snapshot(job_id)
@@ -852,6 +1023,10 @@ def make_handler(
                 self._error(413, "файл слишком большой")
                 return
             body = self.rfile.read(length) if length else b""
+
+            if parsed.path == "/api/clean":
+                self._send(200, _dumps({"text": clean_text(cfg)}))
+                return
 
             if parsed.path == "/api/upload":
                 raw_name = unquote(parsed.query.replace("name=", "", 1) or "upload.mp4")
