@@ -330,6 +330,17 @@ input::placeholder{color:#78818e}
 .preview figure{margin:0;display:flex;flex-direction:column;gap:5px}
 .preview img{width:100%;aspect-ratio:16/9;object-fit:cover;border-radius:7px;
   background:#0b0d10;border:1px solid var(--line);display:block}
+/* кадр по ссылке идёт несколько секунд: показываем, что он ещё едет */
+.preview .thumb{position:relative;border-radius:7px;overflow:hidden}
+.preview .thumb img{color:transparent}  /* пока кадра нет, alt не должен лезть в рамку */
+.preview .thumb .loading{position:absolute;inset:0;display:none;align-items:center;
+  justify-content:center;gap:8px;background:#0b0d10c4;color:var(--ink-2);
+  font-size:11.5px;font-family:var(--mono);border:1px solid var(--line);border-radius:7px}
+.preview .thumb.busy .loading{display:flex}
+.preview .thumb.busy img{opacity:.35;filter:saturate(.5)}
+.preview .thumb .spin{width:13px;height:13px;border-radius:50%;flex:none;
+  border:2px solid #ffffff2e;border-top-color:var(--accent);animation:spin .8s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
 .preview figcaption{font-size:11px;color:var(--ink-3)}
 .preview figcaption b{color:var(--ink-2);font-weight:500}
 .preview .frame-note{color:var(--err);font-size:10.5px}
@@ -535,7 +546,10 @@ input::placeholder{color:#78818e}
       <div class="preview" id="preview" hidden>
         <div class="thumbs">
           <figure>
-            <img id="thumb-start" alt="кадр в начале отрезка">
+            <div class="thumb">
+              <img id="thumb-start" alt="кадр в начале отрезка">
+              <span class="loading"><i class="spin"></i><span class="loading-text">обновляю…</span></span>
+            </div>
             <figcaption>начало <b id="cap-start" class="mono">0:00</b>
               <span class="frame-note" id="note-start"></span></figcaption>
             <div class="stepper" data-field="start">
@@ -546,7 +560,10 @@ input::placeholder{color:#78818e}
             </div>
           </figure>
           <figure>
-            <img id="thumb-end" alt="кадр в конце отрезка">
+            <div class="thumb">
+              <img id="thumb-end" alt="кадр в конце отрезка">
+              <span class="loading"><i class="spin"></i><span class="loading-text">обновляю…</span></span>
+            </div>
             <figcaption>конец <b id="cap-end" class="mono">0:30</b>
               <span class="frame-note" id="note-end"></span></figcaption>
             <div class="stepper" data-field="end">
@@ -1120,10 +1137,38 @@ async function loadFrame(img, tc, onMissing, noteEl) {
   img.dataset.seq = seq;
   const fresh = () => img.dataset.seq === seq;
   const mark = (text) => { if (noteEl && fresh()) noteEl.textContent = text; };
+
+  // Кадр по ссылке идёт 5–10 с, и всё это время на экране старая картинка —
+  // без пометки она выглядит как уже обновлённая. Показываем поверх затемнение,
+  // вертушку и счётчик секунд; локальный файл отвечает мгновенно — не мигаем.
+  const holder = img.closest('.thumb');
+  const label = holder && holder.querySelector('.loading-text');
+  const began = Date.now();
+  let ticker = null, warmup = null;
+  const paint = () => {
+    if (!label) return;
+    const secs = Math.floor((Date.now() - began) / 1000);
+    label.textContent = secs > 0 ? 'обновляю… ' + secs + ' с' : 'обновляю…';
+  };
+  const showBusy = () => {
+    warmup = null;
+    if (!holder) return;
+    holder.classList.add('busy');
+    paint();
+    ticker = setInterval(paint, 500);
+  };
+  const hideBusy = () => {
+    if (warmup) { clearTimeout(warmup); warmup = null; }
+    if (ticker) { clearInterval(ticker); ticker = null; }
+    if (holder) holder.classList.remove('busy');
+  };
+  warmup = setTimeout(showBusy, 160);
+
   try {
     const res = await fetch(frameUrl(tc));
     if (!fresh()) return;
     if (!res.ok) {
+      hideBusy();
       const data = await res.json().catch(() => ({}));
       // старый кадр не стираем, но и молчать нельзя: подписываем, что он устарел
       mark('· кадр не получен');
@@ -1146,6 +1191,8 @@ async function loadFrame(img, tc, onMissing, noteEl) {
     mark('· кадр не получен');
     if (onMissing) onMissing('');
   }
+  // busy снимаем только свежий запрос: иначе он погасит вертушку более нового
+  if (fresh()) hideBusy();
 }
 
 function offerWindowDownload(message) {

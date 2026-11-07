@@ -856,6 +856,28 @@ class TestPreview:
         assert PAGE.count('data-step="1"') == 2
 
 
+class TestFrameBusy:
+    """Пока кадр по ссылке едет, старая картинка не должна выглядеть новой."""
+
+    def test_overlay_markup_and_styles_exist(self):
+        from video_clipper.gui import PAGE
+
+        assert PAGE.count('class="thumb"') == 2
+        assert PAGE.count('class="loading-text"') == 2
+        assert ".preview .thumb.busy .loading{display:flex}" in PAGE
+        assert ".preview .thumb .spin{" in PAGE
+        assert "@keyframes spin{" in PAGE
+
+    def test_javascript_shows_elapsed_seconds(self):
+        from video_clipper.gui import PAGE
+
+        assert "holder.classList.add('busy')" in PAGE
+        assert "'обновляю… ' + secs + ' с'" in PAGE
+        assert "setTimeout(showBusy, 160)" in PAGE
+        # устаревший ответ не должен гасить вертушку нового запроса
+        assert "if (fresh()) hideBusy();" in PAGE
+
+
 class TestPageVersion:
     """После перезапуска сервиса открытая вкладка должна обновиться сама."""
 
