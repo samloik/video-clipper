@@ -399,6 +399,127 @@ class TestOpenEnd:
         assert "конец ролика" in job["error"]
 
 
+class TestBatch:
+    def _clipper(self, tmp_path):
+        """Возвращает по клипу на каждый отрезок — как настоящий нарезчик."""
+        seen = {}
+
+        def clip(source, segments, fast, cfg, progress=None, vertical=False, layout="crop"):
+            seen["segments"] = [(s.start, s.end) for s in segments]
+            out = []
+            for i, seg in enumerate(segments):
+                path = tmp_path / "out" / f"clip{i}.mp4"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"mp4" * 10)
+                out.append(
+                    ClipResult(
+                        source=source, segment=seg, output_path=path,
+                        duration=seg.duration, mode="accurate", size_bytes=40,
+                    )
+                )
+            return out
+
+        return clip, seen
+
+    def test_several_segments_in_one_request(self, server_factory, tmp_path):
+        clipper, seen = self._clipper(tmp_path)
+        base = server_factory(clipper)
+        media = tmp_path / "v.mp4"
+        media.write_bytes(b"x")
+        status, body = post_json(base, "/api/clip", {
+            "source": str(media),
+            "segments": [
+                {"start": "0:00", "end": "0:05"},
+                {"start": "0:10", "end": "0:15"},
+                {"start": "1:00", "end": "1:30"},
+            ],
+        })
+        assert status == 202
+        for _ in range(60):
+            job = json.loads(get(base, f"/api/jobs/{body['job_id']}")[1])
+            if job["state"] != "running":
+                break
+            time.sleep(0.05)
+        assert job["state"] == "done", job.get("error")
+        assert seen["segments"] == [(0.0, 5.0), (10.0, 15.0), (60.0, 90.0)]
+        assert len(job["results"]) == 3
+
+    def test_open_end_inside_the_batch(self, server_factory, tmp_path, ten_seconds):
+        base = server_factory(default_clipper)
+        status, body = post_json(base, "/api/clip", {
+            "source": str(ten_seconds),
+            "segments": [
+                {"start": "0:00", "end": "0:02"},
+                {"start": "0:07", "end": "*"},
+            ],
+        })
+        assert status == 202
+        for _ in range(120):
+            job = json.loads(get(base, f"/api/jobs/{body['job_id']}")[1])
+            if job["state"] != "running":
+                break
+            time.sleep(0.1)
+        assert job["state"] == "done", job.get("error")
+        durations = sorted(round(item["duration"], 1) for item in job["results"])
+        assert durations == pytest.approx([2.0, 3.0], abs=0.4)
+
+    def test_overlaps_are_allowed_in_the_batch(self, server_factory, tmp_path):
+        clipper, seen = self._clipper(tmp_path)
+        base = server_factory(clipper)
+        media = tmp_path / "v.mp4"
+        media.write_bytes(b"x")
+        status, body = post_json(base, "/api/clip", {
+            "source": str(media),
+            "segments": [{"start": "0:00", "end": "0:10"}, {"start": "0:05", "end": "0:15"}],
+        })
+        assert status == 202, body
+
+    def test_bad_segment_fails_with_400(self, server_factory, tmp_path):
+        base = server_factory(fake_clipper(tmp_path / "c.mp4"))
+        media = tmp_path / "v.mp4"
+        media.write_bytes(b"x")
+        status, body = post_json(base, "/api/clip", {
+            "source": str(media),
+            "segments": [{"start": "0:10", "end": "0:05"}],
+        })
+        assert status == 400
+
+    def test_zip_bundles_every_clip(self, server_factory, tmp_path):
+        import io
+        import zipfile
+
+        clipper, _ = self._clipper(tmp_path)
+        base = server_factory(clipper)
+        media = tmp_path / "v.mp4"
+        media.write_bytes(b"x")
+        _, body = post_json(base, "/api/clip", {
+            "source": str(media),
+            "segments": [{"start": "0:00", "end": "0:02"}, {"start": "0:10", "end": "0:12"}],
+        })
+        job_id = body["job_id"]
+        for _ in range(60):
+            job = json.loads(get(base, f"/api/jobs/{job_id}")[1])
+            if job["state"] != "running":
+                break
+            time.sleep(0.05)
+        status, payload, headers = _get(base + f"/api/zip/{job_id}")
+        assert status == 200
+        assert headers["Content-Type"] == "application/zip"
+        with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+            assert len(archive.namelist()) == 2
+
+    def test_zip_for_unfinished_job_is_404(self, server_factory, tmp_path):
+        base = server_factory(fake_clipper(tmp_path / "c.mp4"))
+        status, body, _ = _get(base + "/api/zip/nope")
+        assert status == 404
+
+    def test_page_has_the_segment_list(self):
+        from video_clipper.gui import PAGE
+
+        assert 'id="segments"' in PAGE and 'id="add-seg"' in PAGE
+        assert "в списке" in PAGE and "/api/zip/" in PAGE
+
+
 class TestRetention:
     def test_get_returns_current_value(self, server_factory, tmp_path):
         base = server_factory(fake_clipper(tmp_path / "c.mp4"))

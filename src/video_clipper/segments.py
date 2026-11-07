@@ -175,6 +175,14 @@ def parse_range_spec(spec: str) -> Segment:
     )
 
 
+def parse_end_token(value: object) -> float:
+    """End of a range: a timecode, or ``*``/«конец» for the end of the video."""
+    raw = str(value or "").strip().lower()
+    if raw in OPEN_END_WORDS:
+        return OPEN_END
+    return parse_timecode(value)  # type: ignore[arg-type]
+
+
 def parse_ranges(spec: str) -> list[Segment]:
     """Parse one or more ranges separated by ``;``."""
     chunks = [chunk.strip() for chunk in spec.split(";") if chunk.strip()]

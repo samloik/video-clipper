@@ -15,8 +15,10 @@ import os
 import secrets
 import shutil
 import threading
+import tempfile
 import time
 import uuid
+import zipfile
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -27,11 +29,10 @@ from .config import Config, apply_retention_override, load_config
 from .cut import ClipResult
 from .probe import EnvironmentProblem, check_tools
 from .segments import (
-    OPEN_END,
-    OPEN_END_WORDS,
     Segment,
     clip_filename,
     is_open_end,
+    parse_end_token,
     validate_segments,
 )
 from .source import is_url
@@ -281,7 +282,18 @@ input::placeholder{color:#78818e}
   cursor:pointer;min-height:32px}
 .presets button:hover{border-color:var(--line-2);color:var(--ink)}
 .presets button.on{border-color:var(--accent);color:var(--accent);background:#e0a45814}
-.presets .to-end{border-color:#4a3a20;color:var(--accent)}
+.presets .to-end,.presets .addseg{border-color:#4a3a20;color:var(--accent)}
+.presets .addseg{border-style:dashed}
+.segments{list-style:none;margin:10px 0 0;padding:0;display:flex;flex-direction:column;gap:6px}
+.segments[hidden]{display:none}
+.segments li{display:flex;align-items:center;justify-content:space-between;gap:10px;
+  border:1px solid var(--line);border-radius:8px;padding:7px 10px;background:var(--panel)}
+.segments li span{font-family:var(--mono);font-size:13px;color:var(--ink);cursor:pointer}
+.segments li span:hover{color:var(--accent)}
+.segments li button{background:transparent;border:0;color:var(--ink-3);cursor:pointer;
+  font-size:14px;line-height:1;padding:4px 6px;min-height:26px;border-radius:6px}
+.segments li button:hover{color:var(--err);background:#1e1513}
+.seg-count{font-size:12px;color:var(--ink-3);margin-top:6px;min-height:14px}
 .presets .reset{margin-left:auto;border-color:transparent;color:var(--ink-3);
   text-decoration:underline;text-underline-offset:3px;font-family:var(--sans)}
 .presets .reset:hover{color:var(--ink-2)}
@@ -349,6 +361,8 @@ input::placeholder{color:#78818e}
   border:1px solid var(--line);border-radius:7px;padding:7px 11px;min-height:34px;
   display:inline-flex;align-items:center}
 .results .get:hover{border-color:var(--accent)}
+.results li.zip{grid-template-columns:minmax(0,1fr) auto;background:var(--panel-2)}
+.results li.zip .meta{margin-top:0;color:var(--ink-2)}
 
 .empty{border:1px solid var(--line);border-radius:var(--r);padding:18px 16px;
   color:var(--ink-3);font-size:13px;line-height:1.6;display:flex;flex-direction:column;gap:10px}
@@ -441,8 +455,11 @@ input::placeholder{color:#78818e}
         <button type="button" data-len="60">1 мин</button>
         <button type="button" data-len="180">3 мин</button>
         <button type="button" class="to-end" data-end="1">до конца</button>
+        <button type="button" class="addseg" id="add-seg">+ в список</button>
         <button type="button" class="reset" data-reset="1">сброс</button>
       </div>
+      <ul class="segments" id="segments" hidden></ul>
+      <div class="seg-count mono" id="seg-count"></div>
       <p class="hint" style="margin-top:9px">Таймкоды: <b>45</b>, <b>1:12</b>, <b>0:00:10</b>.
         Вместо «-» можно «=»: <b>1:00=0:30</b> — с 1:00 тридцать секунд.<br>
         «до конца» или <b>*</b> во втором поле — от начала до конца ролика.</p>
@@ -792,6 +809,59 @@ presetButtons.forEach(btn => {
 });
 document.querySelector('.presets .reset').addEventListener('click', () => {
   $('start').value = '0:00'; $('end').value = '0:30'; markPreset(30);
+  segList = []; renderSegments();
+});
+
+let segList = [];
+const segListEl = $('segments'), segCountEl = $('seg-count');
+
+function segLength(seg) {
+  if (seg.end === '*') return null;
+  const len = toSeconds(seg.end) - toSeconds(seg.start);
+  return Number.isFinite(len) && len > 0 ? len : null;
+}
+
+function renderSegments() {
+  segListEl.innerHTML = '';
+  segList.forEach((seg, index) => {
+    const li = document.createElement('li');
+    const label = document.createElement('span');
+    label.textContent = seg.start + ' – ' + seg.end;
+    label.title = 'вернуть в поля';
+    label.addEventListener('click', () => {
+      $('start').value = seg.start;
+      $('end').value = seg.end;
+      segList.splice(index, 1);
+      renderSegments();
+      syncPreset();
+    });
+    const del = document.createElement('button');
+    del.type = 'button';
+    del.textContent = '✕';
+    del.title = 'убрать отрезок';
+    del.addEventListener('click', () => { segList.splice(index, 1); renderSegments(); });
+    li.append(label, del);
+    segListEl.append(li);
+  });
+  segListEl.hidden = segList.length === 0;
+  if (!segList.length) { segCountEl.textContent = ''; return; }
+  const total = segList.reduce((sum, seg) => sum + (segLength(seg) || 0), 0);
+  const unknown = segList.some(seg => segLength(seg) === null);
+  segCountEl.textContent = 'в списке ' + plural(segList.length, 'отрезок', 'отрезка', 'отрезков') +
+    (total > 0 ? ' · ' + fmtSeconds(total) : '') + (unknown ? ' + до конца' : '');
+}
+
+$('add-seg').addEventListener('click', () => {
+  const start = $('start').value.trim(), end = $('end').value.trim();
+  if (!start || !end) { setStatus('Заполни начало и конец, потом добавляй', 'err'); return; }
+  if (end !== '*' && toSeconds(end) <= toSeconds(start)) {
+    setStatus('Конец должен быть больше начала', 'err'); return;
+  }
+  segList.push({ start, end });
+  $('start').value = end === '*' ? '' : end;
+  $('end').value = '';
+  renderSegments();
+  setStatus('Отрезок в списке — добавь ещё или нажми «Нарезать»');
 });
 document.querySelector('.presets .to-end').addEventListener('click', () => {
   $('end').value = '*';
@@ -811,10 +881,17 @@ async function run() {
   const url = urlEl.value.trim();
   const source = url || uploadedPath;
   if (!source) { setStatus('Нужен файл или ссылка', 'err'); return; }
+  let segments;
+  if (segList.length) {
+    segments = segList.slice();
+  } else {
+    const start = $('start').value.trim(), end = $('end').value.trim();
+    if (!start || !end) { setStatus('Нужны начало и конец', 'err'); emptyEl.style.display = ''; return; }
+    segments = [{ start, end }];
+  }
   const body = {
     source,
-    start: $('start').value.trim(),
-    end: $('end').value.trim(),
+    segments,
     fast: $('fast').checked,
     vertical: $('vertical').checked,
     layout: $('vertical').checked ? layout : 'crop'
@@ -856,7 +933,6 @@ async function poll(id) {
     if (job.state === 'done') {
       renderProgress(job);
       renderEta(job);
-      hidePanel();
       setStatus('Готово · ' + plural(job.results.length, 'файл', 'файла', 'файлов'));
       job.results.forEach((r, i) => {
         const li = document.createElement('li');
@@ -883,6 +959,22 @@ async function poll(id) {
         li.append(left, size, get);
         resultsEl.appendChild(li);
       });
+      if (job.results.length > 1) {
+        const zipLi = document.createElement('li');
+        zipLi.className = 'zip';
+        const info = document.createElement('div');
+        info.className = 'meta';
+        info.textContent = 'все ' + plural(job.results.length, 'клип', 'клипа', 'клипов') + ' одним архивом';
+        const zip = document.createElement('a');
+        zip.className = 'get';
+        zip.href = '/api/zip/' + id;
+        zip.textContent = 'скачать zip';
+        zipLi.append(info, zip);
+        resultsEl.appendChild(zipLi);
+      }
+      hidePanel();
+      emptyEl.style.display = job.results.length ? 'none' : '';
+      timerEl.textContent = '';
       return;
     }
     await new Promise(r => setTimeout(r, 700));
@@ -1132,6 +1224,11 @@ GUI_HELP = """Как пользоваться
      от начала, «сброс» возвращает конец к началу ролика.
   3. Нажми «Нарезать» — справа появится клип, его можно скачать.
 
+Несколько отрезков
+  Заполни начало и конец, нажми «+ в список» — отрезок уйдёт в список, поля очистятся.
+  Так добавь сколько нужно: «Нарезать» порежет все сразу, а кнопка «скачать zip» отдаст
+  их одним архивом. Крестик убирает отрезок, клик по времени возвращает его в поля.
+
 До конца ролика
   Кнопка «до конца» ставит в поле «конец» звёздочку: * — от начала до конца файла.
   В таймкоде то же самое: 20-* — с двадцатой секунды до конца.
@@ -1347,6 +1444,31 @@ def make_handler(
                     return
                 self._send(200, _dumps(job))
                 return
+            if path.startswith("/api/zip/"):
+                job_id = path.rsplit("/", 1)[-1]
+                job = _job_snapshot(job_id)
+                if not job or job["state"] != "done" or not job["files"]:
+                    self._error(404, "файлы не готовы")
+                    return
+                files = [Path(name) for name in job["files"] if Path(name).is_file()]
+                if not files:
+                    self._error(404, "файлы удалены")
+                    return
+                bundle = Path(tempfile.mkdtemp(prefix="vc-zip-")) / f"clips-{job_id}.zip"
+                with zipfile.ZipFile(bundle, "w", zipfile.ZIP_STORED) as archive:
+                    for item in files:
+                        archive.write(item, item.name)
+                self.send_response(200)
+                self.send_header("Content-Type", "application/zip")
+                self.send_header("Content-Disposition", attachment_header(bundle.name))
+                self.send_header("Content-Length", str(bundle.stat().st_size))
+                self.end_headers()
+                try:
+                    with bundle.open("rb") as src:
+                        shutil.copyfileobj(src, self.wfile, 1 << 20)
+                finally:
+                    shutil.rmtree(bundle.parent, ignore_errors=True)
+                return
             if path.startswith("/api/download/"):
                 parts = path.split("/")
                 if len(parts) < 5:
@@ -1446,14 +1568,26 @@ def make_handler(
                     source = str(data.get("source") or "").strip()
                     if not source:
                         raise ValueError("не указан файл или ссылка")
-                    start = parse_timecode(data.get("start"))
-                    end_raw = str(data.get("end") or "").strip().lower()
-                    if end_raw in OPEN_END_WORDS:
-                        end = OPEN_END
+                    raw_segments = data.get("segments")
+                    if isinstance(raw_segments, list) and raw_segments:
+                        segments = [
+                            Segment(
+                                parse_timecode(item.get("start")),
+                                parse_end_token(item.get("end")),
+                            )
+                            for item in raw_segments
+                            if isinstance(item, dict)
+                        ]
+                        if not segments:
+                            raise ValueError("пустой список отрезков")
                     else:
-                        end = parse_timecode(data.get("end"))
-                    segments = [Segment(start, end)]
-                    validate_segments(segments, duration=None)
+                        segments = [
+                            Segment(
+                                parse_timecode(data.get("start")),
+                                parse_end_token(data.get("end")),
+                            )
+                        ]
+                    validate_segments(segments, duration=None, allow_overlap=True)
                     vertical = bool(data.get("vertical", False))
                     layout = str(data.get("layout") or "crop")
                     if layout not in ("crop", "blur"):
