@@ -529,6 +529,35 @@ class TestDiskAndHistory:
         assert not old.exists()
 
 
+class TestProgressHeartbeat:
+    def test_idle_download_still_shows_that_it_is_alive(
+        self, server_factory, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr("video_clipper.gui.HEARTBEAT_SECONDS", 0.1)
+
+        def slow_clipper(source, segments, fast, cfg, progress=None, vertical=False,
+                         layout="crop", control=None):
+            time.sleep(1.0)  # как секционная загрузка: событий нет
+            return []
+
+        base = server_factory(slow_clipper)
+        media = tmp_path / "v.mp4"
+        media.write_bytes(b"x")
+        _, body = post_json(base, "/api/clip", {
+            "source": str(media), "segments": [{"start": "0:00", "end": "0:05"}],
+        })
+        seen = None
+        for _ in range(80):
+            job = json.loads(get(base, f"/api/jobs/{body['job_id']}")[1])
+            if "уже" in str(job.get("detail") or ""):
+                seen = job
+                break
+            time.sleep(0.05)
+        assert seen is not None, "без событий прогресса статус должен обновляться по таймеру"
+        assert seen["state"] == "running"
+        assert "уже" in seen["message"]
+
+
 class TestCancel:
     def _slow_clipper(self):
         def clipper(source, segments, fast, cfg, progress=None, vertical=False,

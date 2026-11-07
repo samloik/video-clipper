@@ -47,6 +47,9 @@ MAX_UPLOAD = 4 * 1024 * 1024 * 1024  # 4 GB
 # Эстимейт для GUI: локальный файл не надо качать, поэтому накладные меньше.
 ESTIMATE_LOCAL_OVERHEAD = 4.0
 ESTIMATE_URL_OVERHEAD = 15.0
+# Секционная загрузка идёт через ffmpeg и не даёт событий прогресса — раз в N секунд
+# обновляем строку статуса, чтобы «готовлю источник» не висело мёртвым.
+HEARTBEAT_SECONDS = 4.0
 SESSION_COOKIE = "vc_session"
 SESSION_MAX_AGE = 12 * 3600
 SESSION_REMEMBER_AGE = 30 * 24 * 3600  # «запомнить меня на месяц»
@@ -1166,6 +1169,7 @@ def _run_job(
 ) -> None:
     control = _job_control(job_id)
     started = time.monotonic()
+    stop_heartbeat = threading.Event()
     mode_text = ", ".join(
         ["без перекодирования" if fast else "точный"]
         + (["9:16 с размытым фоном" if layout == "blur" else "9:16"] if vertical else [])
@@ -1190,6 +1194,7 @@ def _run_job(
         if extra.get("error"):
             entry["error"] = str(extra["error"])[:200]
         record_history(cfg.history_path(), entry)
+        stop_heartbeat.set()
         _job_update(job_id, state=state, **extra)
 
     try:
@@ -1210,8 +1215,12 @@ def _run_job(
             estimate=list(estimate) if estimate else None,
         )
 
+        last_event = time.monotonic()
+
         def progress(*args) -> None:
             """Accept both the bot-style (stage, fraction, detail) and a plain message."""
+            nonlocal last_event
+            last_event = time.monotonic()
             if len(args) == 1:
                 _job_update(job_id, message=str(args[0]))
                 return
@@ -1225,6 +1234,33 @@ def _run_job(
                 detail=detail,
                 message=detail or {"download": "Скачиваю", "encode": "Кодирую"}.get(stage, stage),
             )
+        cache_dir = Path(cfg.cache_dir).expanduser()
+
+        def cache_files_mb() -> float:
+            try:
+                return sum(p.stat().st_size for p in cache_dir.rglob("*") if p.is_file()) / 1048576
+            except OSError:
+                return 0.0
+
+        def heartbeat() -> None:
+            from .timecode import human_duration
+
+            base_mb = cache_files_mb()
+            while not stop_heartbeat.wait(HEARTBEAT_SECONDS):
+                job = _job_snapshot(job_id)
+                if not job or job.get("state") != "running":
+                    return
+                if job.get("fraction") is not None:
+                    continue  # настоящий прогресс уже идёт
+                idle = time.monotonic() - last_event
+                stage = str(job.get("stage") or "")
+                word = {"download": "Скачиваю", "encode": "Кодирую"}.get(stage, "Работаю")
+                grown = cache_files_mb() - base_mb
+                amount = f" · скачано {grown:.0f} МБ" if grown >= 1 else ""
+                detail = f"уже {human_duration(idle)}{amount}"
+                _job_update(job_id, detail=detail, message=f"{word} · {detail}")
+
+        threading.Thread(target=heartbeat, daemon=True).start()
         try:
             results = clipper(
                 source,

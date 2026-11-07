@@ -11,6 +11,7 @@ import pytest
 
 from video_clipper.bot import (
     ProgressReporter,
+    handle_callback,
     build_info,
     clip_caption,
     describe_request,
@@ -178,6 +179,52 @@ class TestErrorContext:
         assert "Отрезок:" in text and "Режим:" in text
         assert "Ошибка: Секционная загрузка отклонена сайтом" in text
         assert "9:16" in text
+
+
+class TestVerticalProgress:
+    def test_vertical_recut_shows_progress(self, tmp_path, monkeypatch):
+        from video_clipper import bot as botmod
+        from video_clipper.cut import ClipResult
+
+        media = tmp_path / "src.mp4"
+        media.write_bytes(b"x")
+        key = "abc123"
+        botmod.JOBS[key] = {
+            "path": str(media),
+            "source": "https://youtu.be/x",
+            "title": "ролик",
+            "segments": [{"start": 0.0, "end": 5.0}],
+            "shown": [{"start": 0.0, "end": 5.0}],
+            "has_audio": True,
+            "height": 720,
+        }
+
+        def fake_cut(src, out, seg, **kwargs):
+            callback = kwargs.get("progress")
+            if callback:
+                callback("encode", 0.0, seg.label)
+                callback("encode", 0.5, seg.label)
+            out = Path(out)
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_bytes(b"x")
+            return ClipResult(
+                source=str(src), segment=seg, output_path=out,
+                duration=seg.duration, mode="accurate", size_bytes=1,
+            )
+
+        monkeypatch.setattr("video_clipper.cut.cut_segment", fake_cut)
+        monkeypatch.setattr(botmod, "send_video_smart", lambda *a, **k: None)
+
+        bot = FakeBot()
+        bot.call = lambda method, payload=None: {}
+        handle_callback(
+            bot, _cfg(tmp_path),
+            {"id": "1", "data": f"vert:{key}", "message": {"chat": {"id": 1}}},
+        )
+        texts = [text for _, text in bot.messages] + [text for _, _, text in bot.edits]
+        assert any("Кодирую" in text for text in texts), texts
+        assert any("%" in text for text in texts), "процент должен появиться хотя бы раз"
+        assert any("Готово" in text for text in texts)
 
 
 class TestTimeCommand:

@@ -822,6 +822,10 @@ def cancel_retry(chat_id: int) -> bool:
     return False
 
 
+PROGRESS_MIN_INTERVAL = 8.0
+PROGRESS_HEARTBEAT = 10.0
+
+
 class ProgressReporter:
     """One chat message that is edited as the job advances.
 
@@ -831,14 +835,21 @@ class ProgressReporter:
     silent for minutes while the job is happily working.
     """
 
-    def __init__(self, bot, chat_id: int, min_interval: float = 8.0, heartbeat: float = 10.0):
+    def __init__(
+        self,
+        bot,
+        chat_id: int,
+        min_interval: float | None = None,
+        heartbeat: float | None = None,
+    ):
         self.bot = bot
         self.chat_id = chat_id
-        self.min_interval = min_interval
-        self.heartbeat = heartbeat
+        self.min_interval = PROGRESS_MIN_INTERVAL if min_interval is None else min_interval
+        self.heartbeat = PROGRESS_HEARTBEAT if heartbeat is None else heartbeat
         self.message_id: int | None = None
         self._last_at = 0.0
         self._last_text = ""
+        self._last_fraction: float | None = None
         self._stage = ""
         self._fraction: float | None = None
         self._detail = ""
@@ -904,8 +915,13 @@ class ProgressReporter:
             return
         if self.message_id is None:
             self._send(self._text())
+            self._last_fraction = fraction
             return
-        self._edit(force=fraction is not None and fraction >= 0.999)
+        # Первый процент показываем сразу, дальше — не чаще min_interval,
+        # иначе Telegram отвечает «message is not modified».
+        first_fraction = self._last_fraction is None and fraction is not None
+        self._edit(force=first_fraction or (fraction is not None and fraction >= 0.999))
+        self._last_fraction = fraction
 
     def finish(self, text: str = "✅ Готово") -> None:
         self._stop.set()
@@ -1309,7 +1325,7 @@ def handle_message(bot, cfg: Config, message: dict, clipper=None) -> None:
 
 def handle_callback(bot, cfg: Config, callback: dict) -> None:
     """Re-cut the same fragment with -c copy (the ⚡ button)."""
-    from .cut import cut_segment
+    from .cut import CutCancelled, cut_segment
 
     data = str(callback.get("data") or "")
     message = callback.get("message") or {}
@@ -1343,13 +1359,13 @@ def handle_callback(bot, cfg: Config, callback: dict) -> None:
         return
 
     total = sum(item["end"] - item["start"] for item in job["segments"])
+    reporter: ProgressReporter | None = None
     if vertical:
         answer("Режу вертикально...")
-        bot.send_message(
-            chat_id,
-            f"Режу вертикально: {total:.0f} с видео, обычно 1–3 минуты. "
-            f"Пришлю сюда, как будет готово.",
-        )
+        # Кодирование 9:16 идёт десятки секунд — показываем процент и «уже N с»,
+        # иначе в чате висит одно обещание и непонятно, живой ли процесс.
+        reporter = ProgressReporter(bot, chat_id)
+        reporter.start("encode", f"{total:.0f} с видео")
     else:
         answer("Режу без перекодирования...")
         bot.send_message(chat_id, f"Режу без перекодирования: {total:.0f} с, это быстро.")
@@ -1360,10 +1376,21 @@ def handle_callback(bot, cfg: Config, callback: dict) -> None:
 
     out_dir = Path(cfg.output_dir).expanduser()
     sent = 0
+    total_clips = len(job["segments"])
     for i, raw in enumerate(job["segments"]):
         seg = Segment(raw["start"], raw["end"])
         shown_raw = job["shown"][i] if i < len(job["shown"]) else raw
         shown = Segment(shown_raw["start"], shown_raw["end"])
+        def clip_progress(
+            stage: str, fraction: float | None, detail: str, _index: int = i
+        ) -> None:
+            if reporter is not None:
+                reporter.update(
+                    "encode",
+                    fraction,
+                    f"клип {_index + 1}/{total_clips}" if total_clips > 1 else "",
+                )
+
         try:
             result = cut_segment(
                 str(source_path),
@@ -1385,8 +1412,17 @@ def handle_callback(bot, cfg: Config, callback: dict) -> None:
                     job.get("height"), cfg.vertical_width, cfg.vertical_height
                 ),
                 timeout=FFMPEG_TIMEOUT,
+                progress=clip_progress if reporter is not None else None,
+                cancel=STOP_REQUESTED if reporter is not None else None,
             )
+        except (JobCancelled, CutCancelled):
+            if reporter is not None:
+                reporter.finish("⛔️ Остановлено")
+            return
         except Exception as exc:  # noqa: BLE001
+            if reporter is not None:
+                reporter.finish("⚠️ Ошибка")
+                reporter = None
             bot.send_message(chat_id, f"Не смог перерезать: {exc}")
             continue
         try:
@@ -1403,6 +1439,8 @@ def handle_callback(bot, cfg: Config, callback: dict) -> None:
             sent += 1
         except TelegramError as exc:
             bot.send_message(chat_id, f"Не смог отправить видео: {exc}")
+    if reporter is not None:
+        reporter.finish("✅ Готово" if sent else "⚠️ Не получилось")
     if sent:
         note = (
             "Готово без перекодирования. Границы могли сместиться к ключевому кадру; "
