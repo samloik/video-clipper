@@ -322,6 +322,61 @@ class TestDownload:
         src = prepare_source("https://youtu.be/x", cfg, segments=[(0, 28)], downloader=fake_downloader)
         assert src.path == sample_video
 
+    def test_unknown_duration_does_not_start_a_full_download(self, sample_video, tmp_path):
+        """Метаданные молчат → длительность неизвестна. Полную загрузку «наугад» не начинаем."""
+        attempts = []
+
+        def downloader(url, opts):
+            attempts.append(dict(opts))
+            if opts.get("skip_download"):
+                raise RuntimeError("ERROR: [youtube] X: Sign in to confirm you're not a bot")
+            if opts.get("download_ranges"):
+                raise RuntimeError("ERROR: ffmpeg exited with code 1")
+            return {"requested_downloads": [{"filepath": str(sample_video)}]}
+
+        cfg = _clean_config().with_overrides(cache_dir=tmp_path / "cache", use_sections=True)
+        with pytest.raises(SourceError) as err:
+            prepare_source("https://youtu.be/unknown", cfg, segments=[(0, 30)],
+                           downloader=downloader)
+        assert "длительность ролика неизвестна" in str(err.value)
+        assert not any(not o.get("skip_download") and not o.get("download_ranges")
+                       for o in attempts), "полной загрузки быть не должно"
+
+    def test_two_parallel_requests_download_once(self, sample_video, tmp_path):
+        """Два «Нарезать» подряд не должны качать один ролик дважды."""
+        import threading
+        import time as _time
+
+        calls = []
+
+        def downloader(url, opts):
+            calls.append(dict(opts))
+            if opts.get("skip_download"):
+                return {"duration": 30}
+            _time.sleep(0.25)
+            return {"requested_downloads": [{"filepath": str(sample_video)}]}
+
+        cfg = _clean_config().with_overrides(cache_dir=tmp_path / "cache")
+        results, errors = [], []
+
+        def run():
+            try:
+                results.append(prepare_source("https://youtu.be/same", cfg,
+                                              segments=[(0, 28)], keep_source=True,
+                                              downloader=downloader))
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        threads = [threading.Thread(target=run) for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert not errors, errors
+        assert len(results) == 2
+        downloads = [o for o in calls if not o.get("skip_download")]
+        assert len(downloads) == 1, "вторая заявка должна дождаться первой загрузки"
+
     def test_section_auth_error_does_not_fall_back_to_full_download(self, sample_video, tmp_path):
         """A bot-check on the section must not start a multi-hundred-MB download."""
         attempts = []

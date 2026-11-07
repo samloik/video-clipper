@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+import threading
 import time
 import shutil
 from dataclasses import dataclass
@@ -206,10 +207,51 @@ def prepare_source(
             url=source,
         )
 
-    return _download(source, cfg, segments or [], keep_source, downloader, cancel_event, progress)
+    # Три нажатия «Нарезать» подряд не должны запускать три загрузки одного ролика:
+    # они душат друг друга на прокси, и каждая падает по таймауту.
+    with _download_lock(source):
+        cached = find_cached_source(cfg.cache_dir, source, cfg.retention_minutes)
+        if cached is not None:
+            return Source(
+                path=cached,
+                title=cached.stem,
+                is_temporary=False,
+                info=probe_media(str(cached), cfg.ffprobe_path),
+                url=source,
+            )
+        done = _DOWNLOADED.get(source)
+        if done is not None and done.is_file():
+            return Source(
+                path=done,
+                title=done.stem,
+                is_temporary=False,
+                info=probe_media(str(done), cfg.ffprobe_path),
+                url=source,
+            )
+        built = _download(
+            source, cfg, segments or [], keep_source, downloader, cancel_event, progress
+        )
+        if not built.is_temporary:
+            _DOWNLOADED[source] = built.path
+        return built
 
 
 SECTION_COVERAGE = 0.4
+
+_DOWNLOAD_LOCKS: dict[str, threading.Lock] = {}
+_DOWNLOAD_LOCKS_GUARD = threading.Lock()
+# Что уже скачано в этом процессе: второй запрос того же ролика ждёт первый
+# и забирает тот же файл, вместо второй загрузки через прокси.
+_DOWNLOADED: dict[str, Path] = {}
+
+
+def _download_lock(source: str) -> threading.Lock:
+    """Замок на источник: одна загрузка за раз, остальные ждут её результата."""
+    with _DOWNLOAD_LOCKS_GUARD:
+        lock = _DOWNLOAD_LOCKS.get(source)
+        if lock is None:
+            lock = _DOWNLOAD_LOCKS[source] = threading.Lock()
+        return lock
 
 
 def cached_metadata(url: str) -> dict[str, Any]:
@@ -410,6 +452,14 @@ def _download(
                 raise SourceError(
                     f"Секционная загрузка отклонена сайтом. {explain_error(exc, cfg)}\n\n"
                     f"Полную загрузку не начинаю — с этой блокировкой она тоже не пройдёт."
+                ) from exc
+            if duration <= 0:
+                raise SourceError(
+                    f"Не удалось взять только участки ({explain_error(exc, cfg)}), а "
+                    f"длительность ролика неизвестна.\n\n"
+                    f"Полную загрузку наугад не начинаю: при таком ограничении она "
+                    f"тоже не пройдёт, а качать придётся десятки-сотни мегабайт. "
+                    f"Повтори запрос через 10–15 минут."
                 ) from exc
             if duration > FULL_FALLBACK_MAX_SECONDS:
                 raise SourceError(
