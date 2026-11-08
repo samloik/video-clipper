@@ -175,6 +175,32 @@ class TestPreviewWindow:
         assert path.parent == folder and path.name.endswith("-298.mp4")
         assert find_window(url, cfg, 300) == (path, 298.0, 318.0, 600.0)
 
+    def test_existing_window_is_reused_even_if_the_end_is_farther(self, tmp_path, monkeypatch):
+        """Кадр конца не должен перекачивать участок, который уже накрывает начало."""
+        cfg = _cfg(tmp_path)
+        url = "https://youtu.be/REUSE"
+        folder = windows_dir(cfg)
+        media = _make_video(folder / "REUSE-208.mp4", seconds=20, offset=208)
+
+        import json as _json
+
+        (folder / "REUSE-208.json").write_text(
+            _json.dumps({"source": url, "file": media.name, "start": 208.0,
+                         "end": 228.0, "duration": 600.0}),
+            encoding="utf-8",
+        )
+
+        import video_clipper.source as source_module
+
+        calls = []
+        monkeypatch.setattr(
+            source_module, "download_window",
+            lambda *a, **kw: calls.append(1) or (media, 208.0, {}),
+        )
+        path, start, end = ensure_window(url, cfg, 210, until=345)
+        assert path == media and start == 208.0
+        assert calls == [], "участок уже есть — качать заново нечего"
+
     def test_window_does_not_pass_the_end_of_the_video(self, tmp_path, monkeypatch):
         cfg = _cfg(tmp_path)
         downloaded = _make_video(windows_dir(cfg) / "x.mp4", seconds=2)

@@ -228,18 +228,22 @@ def ensure_window(
 ):
     """Кадры для ссылки: найти участок или скачать короткий кусок вокруг времени.
 
-    ``until`` — конец запрошенного отрезка: если он дальше окна по умолчанию,
-    участок качается сразу до него, чтобы кадр конца не требовал второй загрузки.
+    ``until`` — конец запрошенного отрезка: он влияет только на размер НОВОЙ
+    загрузки. Уже скачанный участок, накрывающий время, возвращается как есть.
     """
+    # Если участок уже покрывает запрошенное время — берём его, даже когда
+    # конец отрезка дальше: иначе каждая рамка качала участок заново (по логу
+    # «скачал 208–268» три раза подряд), а кадры ждали этой загрузки.
+    # Наружу всегда три значения (файл, начало, конец): find_window отдаёт
+    # четыре, и распаковка `path, start, end = ensure_window(...)` ломалась.
     found = find_window(source, cfg, seconds)
     if found is not None:
-        if until is None or until <= found[2]:
-            return found
+        return found[0], found[1], found[2]
     # Один участок на источник: две рамки не должны качать его дважды.
     with _window_lock(source):
         found = find_window(source, cfg, seconds)
-        if found is not None and (until is None or until <= found[2]):
-            return found
+        if found is not None:
+            return found[0], found[1], found[2]
         return _download_window(source, cfg, seconds, until, progress, deadline)
 
 
@@ -596,36 +600,6 @@ def grab_frame(path: Path, seconds: float, width: int = 480) -> bytes:
     return _frame_bytes(str(path), seconds, width)
 
 
-_START_TIMES: dict[tuple[str, float], float] = {}
-
-
-def _container_start(path: str) -> float:
-    """С какого времени начинается файл: у участков с -copyts это 900+ секунд.
-
-    ``ffmpeg -ss`` до ``-i`` считает от начала шкалы файла, а не от его первого
-    кадра, поэтому к «местному» времени нужно прибавить start_time.
-    """
-    try:
-        stat = os.stat(path)
-    except OSError:
-        return 0.0
-    key = (path, stat.st_mtime)
-    if key in _START_TIMES:
-        return _START_TIMES[key]
-    value = 0.0
-    try:
-        out = subprocess.run(
-            ["ffprobe", "-v", "error", "-show_entries", "format=start_time",
-             "-of", "default=nw=1:nk=1", path],
-            capture_output=True, text=True, timeout=10,
-        )
-        value = float((out.stdout or "0").strip() or 0)
-    except (OSError, subprocess.SubprocessError, ValueError):
-        value = 0.0
-    _START_TIMES[key] = value
-    return value
-
-
 def _frame_bytes(
     target: str,
     seconds: float,
@@ -636,9 +610,6 @@ def _frame_bytes(
 ) -> bytes:
     key = cache_key or target
     seconds = max(0.0, float(seconds))
-    if not user_agent and not target.startswith(("http://", "https://")):
-        # участок помнит исходную шкалу ролика — перемотка считается от неё
-        seconds += _container_start(target)
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error"]
     if user_agent:
         cmd += ["-user_agent", user_agent]
