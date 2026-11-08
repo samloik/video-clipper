@@ -398,6 +398,21 @@ input::placeholder{color:#78818e}
 .switch strong{display:block;font-size:14px;font-weight:400;color:var(--ink-2)}
 .switch input:checked ~ strong{color:var(--ink)}
 .switch em{display:block;font-style:normal;font-size:12px;color:var(--ink-3);margin-top:1px}
+.vprev{display:flex;gap:14px;align-items:flex-start;padding:2px 0 4px}
+.vprev[hidden]{display:none}
+.vbox{position:relative;flex:0 0 auto;width:126px;aspect-ratio:9 / 16;border-radius:10px;
+  overflow:hidden;background:#000;border:1px solid var(--line)}
+/* .preview img ставит фон и рамку — внутри 9:16 они не нужны и закрывают размытый фон */
+.vbox img{position:absolute;inset:0;width:100%;height:100%;display:block;color:transparent;
+  background:transparent;border:0;border-radius:0;aspect-ratio:auto}
+.vbox.crop #v-bg{display:none}
+.vbox.crop #v-fg{object-fit:cover;object-position:50% 50%}
+.vbox.blur #v-bg{object-fit:cover;filter:blur(10px) brightness(.95) saturate(1.1);transform:scale(1.12)}
+.vbox.blur #v-fg{object-fit:contain}
+.vtext{display:flex;flex-direction:column;gap:5px;min-width:0}
+.vtitle{font-size:13px;color:var(--ink)}
+.vsub{font-size:12px;color:var(--ink-2)}
+.vhint{font-size:11.5px;color:var(--ink-3);line-height:1.45}
 .layout-choice{display:flex;flex-wrap:wrap;align-items:center;gap:7px;padding:0 0 8px 47px}
 .layout-choice[hidden]{display:none}
 .layout-choice span{font-size:12px;color:var(--ink-3);margin-right:2px}
@@ -592,6 +607,17 @@ input::placeholder{color:#78818e}
               <button type="button" data-step="1" title="конец на секунду позже">+1 с</button>
             </div>
           </figure>
+        </div>
+        <div class="vprev" id="vprev" hidden>
+          <div class="vbox crop" id="vbox">
+            <img id="v-bg" alt="">
+            <img id="v-fg" alt="кадр так, как он попадёт в вертикальный клип">
+          </div>
+          <div class="vtext">
+            <span class="vtitle">так будет в вертикальном клипе</span>
+            <span class="vsub mono" id="v-sub">бока обрезаны · окно 50%</span>
+            <span class="vhint">кадры выше — исходник целиком; окно двигается ползунком ниже</span>
+          </div>
         </div>
         <div class="preview-bar">
           <button type="button" class="ghost" id="prep-frames" hidden>скачать 20 с</button>
@@ -948,11 +974,13 @@ const cropPosEl = $('crop-pos'), kropEl = $('krop'), kropValEl = $('krop-val');
 $('vertical').addEventListener('change', (e) => {
   choiceEl.hidden = !e.target.checked;
   cropPosEl.hidden = !e.target.checked;
+  updateVerticalPreview();
 });
 function setKrop(percent) {
   const value = Math.max(0, Math.min(100, Math.round(percent)));
   kropEl.value = String(value);
   kropValEl.textContent = value + '%';
+  updateVerticalPreview();
 }
 kropEl.addEventListener('input', () => setKrop(Number(kropEl.value)));
 
@@ -1000,8 +1028,34 @@ document.querySelectorAll('.seg').forEach(btn => {
   btn.addEventListener('click', () => {
     layout = btn.dataset.layout;
     document.querySelectorAll('.seg').forEach(x => x.classList.toggle('on', x === btn));
+    updateVerticalPreview();
   });
 });
+
+// Тот же кадр, что в левой рамке, но обрезанный/с размытым фоном — ровно как в клипе.
+// Считаем в браузере: серверу не нужно гонять ffmpeg на каждое движение ползунка.
+function updateVerticalPreview() {
+  const on = $('vertical').checked;
+  const box = $('vprev');
+  if (!box) return;
+  box.hidden = !on;
+  if (!on) return;
+  const frame = ($('thumb-start').src || '').trim();
+  if (frame) {
+    if ($('v-bg').getAttribute('src') !== frame) $('v-bg').src = frame;
+    if ($('v-fg').getAttribute('src') !== frame) $('v-fg').src = frame;
+  }
+  const shallow = $('vbox');
+  shallow.classList.toggle('crop', layout !== 'blur');
+  shallow.classList.toggle('blur', layout === 'blur');
+  // 0 — законное значение (левое окно), поэтому не «|| 50»
+  const raw = Number(kropEl.value);
+  const pos = Number.isFinite(raw) ? Math.max(0, Math.min(100, raw)) : 50;
+  $('v-fg').style.objectPosition = pos + '% 50%';
+  $('v-bg').style.objectPosition = pos + '% 50%';
+  $('v-sub').textContent = (layout === 'blur' ? 'фон размыт' : 'бока обрезаны') +
+    ' · окно ' + pos + '%';
+}
 
 function refreshGo() {
   goBtn.disabled = !(urlEl.value.trim() || uploadedPath);
@@ -1271,6 +1325,8 @@ async function loadFrame(img, tc, onMissing, noteEl, suffix) {
       img.onload = null;
     };
     mark(res.headers.get('X-Frame-Approx') ? '· ближайший кадр' : (suffix || ''));
+    // вертикальный предпросмотр живёт на том же кадре, что и левая рамка
+    if (img.id === 'thumb-start') updateVerticalPreview();
   } catch (err) {
     mark('· сеть не ответила — нажми ещё раз');
     if (onMissing) onMissing('');
@@ -1293,6 +1349,7 @@ function refreshThumbs() {
   const endSec = end && end !== '*' ? toSeconds(end) : null;
   $('cap-start').textContent = start || '0:00';
   $('cap-end').textContent = end || '—';
+  updateVerticalPreview();
   // точные границы известны — не гоняем сервер за кадром, которого нет
   const beyond = (seconds) => mediaInfo && mediaInfo.duration && !mediaInfo.window &&
     seconds > mediaInfo.duration + 0.05;

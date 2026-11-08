@@ -1672,6 +1672,39 @@ class TestRetention:
         assert "Хранение" in text or "хранение" in text
 
 
+class TestVerticalPreview:
+    """Перед нарезкой видно, что именно попадёт в вертикальный клип."""
+
+    def test_markup_shows_the_nine_by_sixteen_crop(self):
+        from video_clipper.gui import PAGE
+
+        assert 'id="vprev"' in PAGE, "блок вертикального превью"
+        assert 'id="vbox"' in PAGE and 'id="v-fg"' in PAGE and 'id="v-bg"' in PAGE
+        assert "object-fit:cover;object-position:50% 50%" in PAGE
+
+    def test_blur_backdrop_is_not_hidden_by_the_frame_styles(self):
+        from video_clipper.gui import PAGE
+
+        # .preview img задаёт фон и рамку — внутри 9:16 они закрывали размытый фон
+        assert "background:transparent;border:0;border-radius:0;aspect-ratio:auto" in PAGE
+        assert ".vbox.blur #v-bg{object-fit:cover;filter:blur(10px)" in PAGE
+        assert ".vbox.blur #v-fg{object-fit:contain}" in PAGE
+
+    def test_slider_zero_is_a_position_not_a_missing_value(self):
+        from video_clipper.gui import PAGE
+
+        # «0 || 50» превращало левое окно в центральное
+        assert "Number.isFinite(raw) ? Math.max(0, Math.min(100, raw)) : 50" in PAGE
+
+    def test_preview_follows_the_controls(self):
+        from video_clipper.gui import PAGE
+
+        assert "function updateVerticalPreview" in PAGE
+        assert PAGE.count("updateVerticalPreview();") >= 4, (
+            "переключатель 9:16, ползунок, выбор фона и загрузка кадра"
+        )
+
+
 class TestGuiHints:
     """Подсказки GUI не должны обещать того, чего в интерфейсе нет."""
 
