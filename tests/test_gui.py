@@ -446,6 +446,22 @@ class TestOpenEnd:
         assert seen["open_ends"] == [True]
 
 
+class TestColumnScrolling:
+    """Сайт должен листаться колесом на коротком экране, а не обрезаться."""
+
+    def test_page_scrolls_as_a_whole(self):
+        from video_clipper.gui import PAGE
+
+        assert "min-height:100dvh;\n     overflow-y:auto}" in PAGE, "страница листается"
+        assert "height:100dvh;\n     overflow:hidden}" not in PAGE, "прежняя фиксация высоты убрана"
+
+    def test_columns_do_not_clip_content(self):
+        from video_clipper.gui import PAGE
+
+        assert "gap:18px;min-height:0}" in PAGE, "левая колонка без внутреннего скролла"
+        assert ".col-out{min-height:0}" in PAGE
+
+
 class TestTimecodeKeyboard:
     """На телефоне в поле таймкода должен быть доступен «:»."""
 
@@ -456,13 +472,14 @@ class TestTimecodeKeyboard:
         # числовая клавиатура осталась только у поля «Хранение» (минуты) — там она уместна
         assert 'id="prompt-input" class="mono" type="text" value="30" inputmode="numeric"' in PAGE
 
-    def test_colon_dot_star_and_end_are_one_tap(self):
+    def test_helper_rows_are_gone(self):
         from video_clipper.gui import PAGE
 
-        assert 'id="tc-keys"' in PAGE
-        assert "data-insert=\":" in PAGE and "data-insert=\"*\"" in PAGE
-        assert "data-insert=\"конец\"" in PAGE
-        assert "input.setSelectionRange(caret, caret)" in PAGE
+        # пользователь попросил убрать ряд вставок «: . * конец» и пресеты длительности
+        assert 'id="tc-keys"' not in PAGE
+        assert 'data-len="15"' not in PAGE and 'data-len="180"' not in PAGE
+        # при этом «+ в список» и «сброс» остались
+        assert 'id="add-seg"' in PAGE and 'data-reset="1"' in PAGE
 
 
 class TestSpinnerInsteadOfBar:

@@ -238,12 +238,15 @@ PAGE = """<!doctype html>
 html,body{margin:0;height:100%}
 body{background:var(--bg);color:var(--ink);font:15px/1.5 var(--sans);
      -webkit-font-smoothing:antialiased;
-     display:grid;grid-template-rows:auto minmax(0,1fr);height:100vh;height:100dvh;
-     overflow:hidden}
+     /* Страница прокручивается как обычный сайт: раньше высота была зафиксирована
+        и на коротких экранах колесо не листало содержимое колонок. */
+     display:flex;flex-direction:column;min-height:100vh;min-height:100dvh;
+     overflow-y:auto}
 .mono{font-family:var(--mono);font-variant-numeric:tabular-nums}
 
 .bar{display:flex;align-items:center;justify-content:space-between;gap:16px;
-     padding:13px 22px;border-bottom:1px solid var(--line);background:#101317}
+     padding:13px 22px;border-bottom:1px solid var(--line);background:#101317;
+     position:sticky;top:0;z-index:5}
 .brand{font-weight:600;letter-spacing:-.01em}
 .brand span{color:var(--ink-3);font-weight:400}
 .chip{font-size:12px;color:var(--ink-2);border:1px solid var(--line);
@@ -283,14 +286,14 @@ body{background:var(--bg);color:var(--ink);font:15px/1.5 var(--sans);
 .danger:focus-visible,.modal .ghost:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 
 .grid{display:grid;grid-template-columns:minmax(320px,420px) minmax(0,1fr);
-      min-height:0;overflow:hidden}
-.col-out{overflow-y:auto}
+      align-items:start;min-height:0}
+.col-out{min-height:0}
 html{scrollbar-width:thin;scrollbar-color:#3a424e transparent}
 ::-webkit-scrollbar{width:10px;height:10px}
 ::-webkit-scrollbar-thumb{background:#3a424e;border-radius:6px}
 ::-webkit-scrollbar-track{background:transparent}
 .col-form{padding:22px;border-right:1px solid var(--line);display:flex;
-          flex-direction:column;gap:18px}
+          flex-direction:column;gap:18px;min-height:0}
 .col-out{padding:22px;display:flex;flex-direction:column;gap:14px;min-width:0}
 
 .label{font-size:12px;letter-spacing:.06em;text-transform:uppercase;
@@ -323,11 +326,6 @@ input::placeholder{color:#78818e}
 .range .dash{color:var(--ink-3);padding-bottom:12px;font-family:var(--mono)}
 .range input{font-size:15px}
 .range label:first-child input,.range label:last-child input{text-align:center}
-.tc-keys{display:flex;gap:6px;margin:6px 0 2px}
-.tc-keys button{min-height:32px;min-width:34px;padding:4px 10px;border-radius:7px;
-  border:1px solid var(--line);background:transparent;color:var(--ink-2);
-  font:12.5px var(--mono);cursor:pointer}
-.tc-keys button:hover{border-color:var(--accent);color:var(--accent)}
 
 .presets{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-top:10px}
 .presets button{background:transparent;border:1px solid var(--line);color:var(--ink-2);
@@ -399,6 +397,7 @@ input::placeholder{color:#78818e}
 .switch input:checked ~ strong{color:var(--ink)}
 .switch em{display:block;font-style:normal;font-size:12px;color:var(--ink-3);margin-top:1px}
 .layout-choice{display:flex;flex-wrap:wrap;align-items:center;gap:7px;padding:0 0 8px 47px}
+.layout-choice[hidden]{display:none}
 .layout-choice span{font-size:12px;color:var(--ink-3);margin-right:2px}
 .crop-pos{display:flex;align-items:center;gap:9px;padding:0 0 10px 47px}
 .crop-pos[hidden]{display:none}
@@ -555,18 +554,7 @@ input::placeholder{color:#78818e}
         <label><span>конец</span><input id="end" class="mono" type="text" value="0:30" inputmode="text"
           autocapitalize="off" autocorrect="off" spellcheck="false" aria-label="Конец"></label>
       </div>
-      <div class="tc-keys" id="tc-keys">
-        <button type="button" data-insert=":">:</button>
-        <button type="button" data-insert=".">.</button>
-        <button type="button" data-insert="*">*</button>
-        <button type="button" data-insert="конец">конец</button>
-      </div>
       <div class="presets">
-        <button type="button" data-len="15">15 с</button>
-        <button type="button" data-len="30">30 с</button>
-        <button type="button" data-len="60">1 мин</button>
-        <button type="button" data-len="180">3 мин</button>
-        <button type="button" class="to-end" data-end="1">до конца</button>
         <button type="button" class="addseg" id="add-seg">+ в список</button>
         <button type="button" class="reset" data-reset="1">сброс</button>
       </div>
@@ -1069,20 +1057,11 @@ async function upload(file) {
   refreshGo();
 }
 
-const presetButtons = [...document.querySelectorAll('.presets button[data-len]')];
-function markPreset(len) {
-  presetButtons.forEach(b => b.classList.toggle('on', len !== null && Number(b.dataset.len) === len));
-}
-presetButtons.forEach(btn => {
-  btn.addEventListener('click', () => {
-    const len = Number(btn.dataset.len);
-    $('end').value = len >= 60 ? Math.floor(len / 60) + ':' + String(len % 60).padStart(2, '0')
-                               : '0:' + String(len).padStart(2, '0');
-    markPreset(len);
-  });
-});
+// Кнопок-пресетов больше нет: длительность вводится таймкодом, а подсветка
+// «какой пресет выбран» потеряла смысл — оставляем пустые заглушки для вызовов.
+function markPreset() {}
 document.querySelector('.presets .reset').addEventListener('click', () => {
-  $('start').value = '0:00'; $('end').value = '0:30'; markPreset(30);
+  $('start').value = '0:00'; $('end').value = '0:30';
   segList = []; renderSegments();
 });
 
@@ -1141,11 +1120,7 @@ document.querySelector('.presets .to-end').addEventListener('click', () => {
   $('end').value = '*';
   markPreset(null);
 });
-function syncPreset() {
-  if ($('end').value.trim() === '*') { markPreset(null); return; }
-  const len = Math.round(toSeconds($('end').value) - toSeconds($('start').value));
-  markPreset(Number.isFinite(len) ? len : null);
-}
+function syncPreset() {}
 [$('start'), $('end')].forEach(el => el.addEventListener('input', syncPreset));
 syncPreset();
 
@@ -1399,26 +1374,6 @@ function schedulePreview() {
   clearTimeout(previewTimer);
   previewTimer = setTimeout(loadMedia, 350);
 }
-
-let lastTcField = null;
-[$('start'), $('end')].forEach(el => {
-  el.addEventListener('focus', () => { lastTcField = el; });
-  el.addEventListener('click', () => { lastTcField = el; });
-});
-
-document.querySelectorAll('#tc-keys button').forEach(btn => {
-  btn.addEventListener('click', () => {
-    const value = btn.dataset.insert;
-    const input = lastTcField || $('start');
-    const start = input.selectionStart == null ? input.value.length : input.selectionStart;
-    const end = input.selectionEnd == null ? input.value.length : input.selectionEnd;
-    input.value = input.value.slice(0, start) + value + input.value.slice(end);
-    const caret = start + value.length;
-    input.focus();
-    input.setSelectionRange(caret, caret);
-    input.dispatchEvent(new Event('input'));
-  });
-});
 
 urlEl.addEventListener('input', schedulePreview);
 [$('start'), $('end')].forEach(el => el.addEventListener('input', schedulePreview));
