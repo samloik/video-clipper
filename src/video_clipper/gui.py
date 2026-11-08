@@ -1519,6 +1519,20 @@ $('prep-frames').addEventListener('click', () => {
   preparePreview(startSec, endSec);
 });
 
+// Мобильные браузеры молча игнорируют seek, пока файл не готов: пробуем, пока не встанет.
+function seekPlayer(target, token) {
+  let tries = 0;
+  const attempt = () => {
+    if (playerEl.dataset.token !== token) return;
+    try { playerEl.currentTime = target; } catch (_) {}
+    if (Math.abs(playerEl.currentTime - target) > 0.3 && tries < 10) {
+      tries += 1;
+      setTimeout(attempt, 180);
+    }
+  };
+  attempt();
+}
+
 $('play-seg').addEventListener('click', () => {
   const source = currentSource();
   if (!source) { setStatus('Сначала выбери файл или ссылку', 'err'); return; }
@@ -1567,7 +1581,7 @@ $('play-seg').addEventListener('click', () => {
     const localEnd = Math.max(localStart + 0.2, end - offset);
     playerEl.dataset.from = String(localStart);
     playerEl.dataset.to = String(localEnd);
-    try { playerEl.currentTime = localStart; } catch (_) {}
+    seekPlayer(localStart, token);
   };
   playerEl.ontimeupdate = () => {
     if (playerEl.dataset.token !== token) return;
@@ -1579,6 +1593,7 @@ $('play-seg').addEventListener('click', () => {
   };
   playerEl.muted = false;
   playerEl.src = url;
+  playerEl.load();
   // play() зовём прямо в обработчике клика: после await браузер уже не считает это жестом
   playerEl.play().catch(() => {
     previewNoteEl.textContent = 'браузер не дал автозапуск — нажми ▶ в плеере';

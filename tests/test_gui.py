@@ -1769,8 +1769,10 @@ class TestServiceEndpoints:
 
         assert "X-Source-Offset" in PAGE, "страница должна спрашивать смещение у сервера"
         assert "method: 'HEAD'" in PAGE
-        assert "playerEl.currentTime = localStart" in PAGE
+        assert "seekPlayer(localStart, token)" in PAGE
         assert "playerEl.dataset.from" in PAGE
+        # мобильные браузеры игнорируют seek, пока файл не готов — нужен повтор
+        assert "function seekPlayer" in PAGE and "tries < 10" in PAGE
 
     def test_info_is_written_for_the_gui_not_the_chat(self, server_factory, tmp_path):
         base = server_factory(fake_clipper(tmp_path / "c.mp4"))
