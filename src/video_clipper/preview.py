@@ -146,6 +146,20 @@ def link_problem(source: str) -> str:
     return ""
 
 
+def source_key(source: str) -> str:
+    """Ключ ролика для кэшей: ссылка с ?si=… и без — это один и тот же ролик.
+
+    Раньше участки искались по точной строке источника, поэтому скачанный
+    участок не находился, если в ссылке отличался хвост (?si=…), и кадр
+    уходил в поток — а там бот-чек.
+    """
+    raw = (source or "").strip()
+    video = video_id_from_url(raw)
+    if video:
+        return f"yt:{video}"
+    return raw
+
+
 def windows_dir(cfg: Config) -> Path:
     """Кэш коротких участков для предпросмотра — отдельно от полных загрузок."""
     return Path(cfg.cache_dir).expanduser() / "preview"
@@ -198,7 +212,7 @@ def find_window(source: str, cfg: Config, seconds: float):
             meta = json.loads(meta_file.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
-        if meta.get("source") != source:
+        if source_key(str(meta.get("source") or "")) != source_key(source):
             continue
         start, end = float(meta.get("start", 0)), float(meta.get("end", 0))
         if not (start <= seconds <= end):
@@ -268,8 +282,15 @@ def _download_window(
         log.info("Участок для кадров не скачался (%s)", str(exc)[:120])
         raise
     if length <= 0:
-        # паспорт файла не прочитался — считаем, что участок дошёл до запрошенного конца
-        length = max(0.0, float(end) - float(offset))
+        # Пустой/битый участок нельзя оставлять в кэше: он потом «находится»
+        # для кадров и плеера, а внутри нет ни одного кадра. Лучше честная
+        # ошибка и попытка заново, чем 262 байта, которые выглядят как успех.
+        try:
+            Path(path).unlink()
+        except OSError:
+            pass
+        log.warning("Участок для кадров пустой (%.0f–%.0f с) — не кэширую", start, end)
+        raise RuntimeError("участок не скачался: файл пустой")
     suffix = path.suffix or ".mp4"
     target = folder / f"{video_id_from_url(source) or 'clip'}-{int(offset)}{suffix}"
     try:
@@ -279,6 +300,7 @@ def _download_window(
         target = path
     meta = {
         "source": source,
+        "key": source_key(source),
         "file": target.name,
         "start": round(float(offset), 3),
         "end": round(float(offset) + length, 3),
@@ -340,7 +362,7 @@ def _load_disk_stream(source: str, cfg: Config) -> tuple[str, dict] | None:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
-    entry = data.get(source)
+    entry = data.get(source_key(source))
     if not isinstance(entry, dict):
         return None
     if time.time() - float(entry.get("ts") or 0) >= STREAM_TTL:
@@ -355,6 +377,7 @@ def _load_disk_stream(source: str, cfg: Config) -> tuple[str, dict] | None:
 def _save_disk_stream(source: str, url: str, meta: dict, cfg: Config) -> None:
     path = _stream_cache_file(cfg)
     data: dict = {}
+    source = source_key(source)
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
@@ -403,12 +426,12 @@ def stream_info(source: str, cfg: Config) -> tuple[str, dict]:
                 _STREAM_FAILURES[source] = (time.time() + STREAM_FAILURE_TTL, str(exc))
                 raise
             log.info("Сайт не отдал поток — беру адрес из прошлого запроса")
-            _STREAM_CACHE[source] = (time.time(), saved[0], saved[1])
+            _STREAM_CACHE[source_key(source)] = (time.time(), saved[0], saved[1])
             return saved
 
 
 def _stream_info_locked(source: str, cfg: Config) -> tuple[str, dict]:
-    cached = _STREAM_CACHE.get(source)
+    cached = _STREAM_CACHE.get(source_key(source))
     if cached and time.time() - cached[0] < STREAM_TTL:
         return cached[1], cached[2]
     from .source import _base_opts, _ytdlp_extract
@@ -475,14 +498,14 @@ def _stream_info_locked(source: str, cfg: Config) -> tuple[str, dict]:
         # получает пустой поток — это проверено на живом ролике
         "user_agent": (info.get("http_headers") or {}).get("User-Agent", ""),
     }
-    _STREAM_CACHE[source] = (time.time(), url, meta)
+    _STREAM_CACHE[source_key(source)] = (time.time(), url, meta)
     _save_disk_stream(source, url, meta, cfg)
     return url, meta
 
 
 def cached_stream(source: str) -> dict:
     """Метаданные потока, если их уже добыли (без обращения к сайту)."""
-    entry = _STREAM_CACHE.get(source)
+    entry = _STREAM_CACHE.get(source_key(source))
     if not entry or time.time() - entry[0] >= STREAM_TTL:
         return {}
     return dict(entry[2])
@@ -531,7 +554,7 @@ def grab_stream_frame(source: str, cfg: Config, seconds: float, width: int = 480
     frame = _attempt()
     if not frame:
         # запрос мог просто не успеть — обновляем адрес и пробуем второй раз
-        _STREAM_CACHE.pop(source, None)
+        _STREAM_CACHE.pop(source_key(source), None)
         log.info("Кадр из потока не пришёл с первого раза, повторяю: %s", source[:60])
         frame = _attempt()
     return frame
@@ -573,6 +596,36 @@ def grab_frame(path: Path, seconds: float, width: int = 480) -> bytes:
     return _frame_bytes(str(path), seconds, width)
 
 
+_START_TIMES: dict[tuple[str, float], float] = {}
+
+
+def _container_start(path: str) -> float:
+    """С какого времени начинается файл: у участков с -copyts это 900+ секунд.
+
+    ``ffmpeg -ss`` до ``-i`` считает от начала шкалы файла, а не от его первого
+    кадра, поэтому к «местному» времени нужно прибавить start_time.
+    """
+    try:
+        stat = os.stat(path)
+    except OSError:
+        return 0.0
+    key = (path, stat.st_mtime)
+    if key in _START_TIMES:
+        return _START_TIMES[key]
+    value = 0.0
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=start_time",
+             "-of", "default=nw=1:nk=1", path],
+            capture_output=True, text=True, timeout=10,
+        )
+        value = float((out.stdout or "0").strip() or 0)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        value = 0.0
+    _START_TIMES[key] = value
+    return value
+
+
 def _frame_bytes(
     target: str,
     seconds: float,
@@ -583,6 +636,9 @@ def _frame_bytes(
 ) -> bytes:
     key = cache_key or target
     seconds = max(0.0, float(seconds))
+    if not user_agent and not target.startswith(("http://", "https://")):
+        # участок помнит исходную шкалу ролика — перемотка считается от неё
+        seconds += _container_start(target)
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error"]
     if user_agent:
         cmd += ["-user_agent", user_agent]

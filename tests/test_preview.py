@@ -85,6 +85,25 @@ class TestFrame:
         assert grab_frame(video, 999, width=160) == b""
 
 
+def _make_video(path, seconds=3.0, offset=None):
+    """Настоящий файл: пустой участок теперь отвергается проверкой длительности."""
+    import shutil
+    import subprocess
+
+    if not shutil.which("ffmpeg"):
+        pytest.skip("нужен ffmpeg")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        "ffmpeg", "-y", "-v", "error",
+        "-f", "lavfi", "-i", "testsrc=size=160x90:rate=10",
+        "-t", str(seconds), "-pix_fmt", "yuv420p", "-c:v", "libx264", "-preset", "ultrafast",
+    ]
+    if offset is not None:
+        cmd += ["-output_ts_offset", str(offset)]
+    subprocess.run(cmd + [str(path)], check=True)
+    return path
+
+
 class TestPreviewWindow:
     """Для ссылки кадры берутся из короткого скачанного участка."""
 
@@ -138,9 +157,7 @@ class TestPreviewWindow:
         url = "https://youtu.be/ID"
         folder = windows_dir(cfg)
         folder.mkdir(parents=True, exist_ok=True)
-        downloaded = folder / "sections" / "ролик-ID.mp4"
-        downloaded.parent.mkdir(parents=True, exist_ok=True)
-        downloaded.write_bytes(b"y" * 32)
+        downloaded = _make_video(folder / "sections" / "ролик-ID.mp4", seconds=20)
 
         calls = {}
 
@@ -160,9 +177,7 @@ class TestPreviewWindow:
 
     def test_window_does_not_pass_the_end_of_the_video(self, tmp_path, monkeypatch):
         cfg = _cfg(tmp_path)
-        downloaded = windows_dir(cfg) / "x.mp4"
-        downloaded.parent.mkdir(parents=True, exist_ok=True)
-        downloaded.write_bytes(b"y")
+        downloaded = _make_video(windows_dir(cfg) / "x.mp4", seconds=2)
 
         import video_clipper.preview as preview_module
         import video_clipper.source as source_module
