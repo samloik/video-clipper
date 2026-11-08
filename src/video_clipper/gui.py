@@ -323,6 +323,11 @@ input::placeholder{color:#78818e}
 .range .dash{color:var(--ink-3);padding-bottom:12px;font-family:var(--mono)}
 .range input{font-size:15px}
 .range label:first-child input,.range label:last-child input{text-align:center}
+.tc-keys{display:flex;gap:6px;margin:6px 0 2px}
+.tc-keys button{min-height:32px;min-width:34px;padding:4px 10px;border-radius:7px;
+  border:1px solid var(--line);background:transparent;color:var(--ink-2);
+  font:12.5px var(--mono);cursor:pointer}
+.tc-keys button:hover{border-color:var(--accent);color:var(--accent)}
 
 .presets{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-top:10px}
 .presets button{background:transparent;border:1px solid var(--line);color:var(--ink-2);
@@ -544,9 +549,17 @@ input::placeholder{color:#78818e}
     <div>
       <span class="label">Диапазон</span>
       <div class="range">
-        <label><span>начало</span><input id="start" class="mono" type="text" value="0:00" inputmode="numeric" aria-label="Начало"></label>
+        <label><span>начало</span><input id="start" class="mono" type="text" value="0:00" inputmode="text"
+          autocapitalize="off" autocorrect="off" spellcheck="false" aria-label="Начало"></label>
         <span class="dash">→</span>
-        <label><span>конец</span><input id="end" class="mono" type="text" value="0:30" inputmode="numeric" aria-label="Конец"></label>
+        <label><span>конец</span><input id="end" class="mono" type="text" value="0:30" inputmode="text"
+          autocapitalize="off" autocorrect="off" spellcheck="false" aria-label="Конец"></label>
+      </div>
+      <div class="tc-keys" id="tc-keys">
+        <button type="button" data-insert=":">:</button>
+        <button type="button" data-insert=".">.</button>
+        <button type="button" data-insert="*">*</button>
+        <button type="button" data-insert="конец">конец</button>
       </div>
       <div class="presets">
         <button type="button" data-len="15">15 с</button>
@@ -1386,6 +1399,26 @@ function schedulePreview() {
   clearTimeout(previewTimer);
   previewTimer = setTimeout(loadMedia, 350);
 }
+
+let lastTcField = null;
+[$('start'), $('end')].forEach(el => {
+  el.addEventListener('focus', () => { lastTcField = el; });
+  el.addEventListener('click', () => { lastTcField = el; });
+});
+
+document.querySelectorAll('#tc-keys button').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const value = btn.dataset.insert;
+    const input = lastTcField || $('start');
+    const start = input.selectionStart == null ? input.value.length : input.selectionStart;
+    const end = input.selectionEnd == null ? input.value.length : input.selectionEnd;
+    input.value = input.value.slice(0, start) + value + input.value.slice(end);
+    const caret = start + value.length;
+    input.focus();
+    input.setSelectionRange(caret, caret);
+    input.dispatchEvent(new Event('input'));
+  });
+});
 
 urlEl.addEventListener('input', schedulePreview);
 [$('start'), $('end')].forEach(el => el.addEventListener('input', schedulePreview));

@@ -446,6 +446,25 @@ class TestOpenEnd:
         assert seen["open_ends"] == [True]
 
 
+class TestTimecodeKeyboard:
+    """На телефоне в поле таймкода должен быть доступен «:»."""
+
+    def test_fields_use_a_text_keyboard(self):
+        from video_clipper.gui import PAGE
+
+        assert PAGE.count('inputmode="text"') == 2, "оба поля таймкода — с обычной клавиатурой"
+        # числовая клавиатура осталась только у поля «Хранение» (минуты) — там она уместна
+        assert 'id="prompt-input" class="mono" type="text" value="30" inputmode="numeric"' in PAGE
+
+    def test_colon_dot_star_and_end_are_one_tap(self):
+        from video_clipper.gui import PAGE
+
+        assert 'id="tc-keys"' in PAGE
+        assert "data-insert=\":" in PAGE and "data-insert=\"*\"" in PAGE
+        assert "data-insert=\"конец\"" in PAGE
+        assert "input.setSelectionRange(caret, caret)" in PAGE
+
+
 class TestSpinnerInsteadOfBar:
     """В панели результата вместо полосы — вращающийся круг перед текстом."""
 
