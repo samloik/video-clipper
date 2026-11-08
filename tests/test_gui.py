@@ -1672,6 +1672,26 @@ class TestRetention:
         assert "Хранение" in text or "хранение" in text
 
 
+class TestGuiHints:
+    """Подсказки GUI не должны обещать того, чего в интерфейсе нет."""
+
+    def test_duration_syntax_is_not_advertised(self):
+        from video_clipper.gui import GUI_HELP, PAGE
+
+        # «1:00=0:30» понимает парсер, но в GUI это некуда вписать — две отдельные поля
+        assert "1:00=0:30" not in PAGE
+        assert "=0:30" not in GUI_HELP
+        assert "Вместо «-»" not in PAGE
+
+    def test_hints_do_not_promize_removed_controls(self):
+        from video_clipper.gui import GUI_HELP, PAGE
+
+        assert "Кнопки 15 с" not in GUI_HELP
+        assert "Кнопка «до конца»" not in GUI_HELP
+        # точка больше не разделитель частей — не обещаем её в примерах
+        assert ", . / " not in GUI_HELP
+
+
 class TestServicePanel:
     def test_hidden_panel_really_hides(self):
         from video_clipper.gui import PAGE
