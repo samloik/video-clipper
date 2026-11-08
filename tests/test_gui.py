@@ -446,6 +446,66 @@ class TestOpenEnd:
         assert seen["open_ends"] == [True]
 
 
+class TestStatusSweepsExpired:
+    """Просроченные файлы убираются при показе статуса, а не висят с «0 с»."""
+
+    def _cfg(self, tmp_path, minutes=1):
+        cfg = load_config(tmp_path / "config.json")
+        cache = tmp_path / "cache"
+        out = tmp_path / "output"
+        cache.mkdir(parents=True, exist_ok=True)
+        out.mkdir(parents=True, exist_ok=True)
+        return cfg.with_overrides(cache_dir=cache, output_dir=out, retention_minutes=minutes)
+
+    def test_expired_files_are_removed(self, tmp_path):
+        import os
+        import time as _time
+
+        from video_clipper.gui import status_text
+
+        cfg = self._cfg(tmp_path)
+        old = Path(cfg.cache_dir) / "старый-89tlUjUJS3Q.mp4"
+        old.write_bytes(b"x" * 1024)
+        two_hours_ago = _time.time() - 2 * 3600
+        os.utime(old, (two_hours_ago, two_hours_ago))
+
+        text = status_text(cfg)
+        assert not old.exists(), "просроченный файл должен исчезнуть"
+        assert "через 0 с" not in text
+        assert "оригиналы: 0 файл(ов)" in text
+
+    def test_fresh_file_stays_with_a_countdown(self, tmp_path):
+        from video_clipper.gui import status_text
+
+        cfg = self._cfg(tmp_path)
+        fresh = Path(cfg.cache_dir) / "свежий-89tlUjUJS3Q.mp4"
+        fresh.write_bytes(b"x")
+
+        text = status_text(cfg)
+        assert fresh.exists()
+        assert "удалится" in text and "через" in text
+        assert "срок вышел" not in text
+
+    def test_running_job_keeps_its_files(self, tmp_path):
+        import os
+        import time as _time
+
+        import video_clipper.gui as gui_module
+
+        cfg = self._cfg(tmp_path)
+        busy = Path(cfg.cache_dir) / "занятый-89tlUjUJS3Q.mp4"
+        busy.write_bytes(b"x")
+        old = _time.time() - 2 * 3600
+        os.utime(busy, (old, old))
+        gui_module.JOBS["test-busy"] = {"state": "running"}
+        try:
+            text = gui_module.status_text(cfg)
+        finally:
+            gui_module.JOBS.pop("test-busy", None)
+        assert busy.exists(), "во время задания файлы не трогаем"
+        assert "срок вышел" in text
+
+
 class TestColumnScrolling:
     """Сайт должен листаться колесом на коротком экране, а не обрезаться."""
 

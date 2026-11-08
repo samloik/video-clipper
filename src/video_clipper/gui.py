@@ -2256,11 +2256,22 @@ def attachment_header(name: str) -> str:
 
 def status_text(cfg: Config) -> str:
     """Что лежит на машине и когда каждый файл исчезнет."""
-    from .storage import describe
+    from .storage import describe, sweep
     from .timecode import format_moment, format_retention, human_duration
 
     minutes = cfg.retention_minutes
+    running_jobs = sum(1 for job in JOBS.values() if job.get("state") == "running")
+    # Просроченные файлы убираем при показе статуса: иначе они висят с «0 с»
+    # и удаляются только при следующей нарезке. Во время работы не трогаем —
+    # там могут быть файлы текущего задания.
+    if running_jobs == 0:
+        try:
+            sweep([Path(cfg.cache_dir), Path(cfg.output_dir)], minutes)
+        except OSError as exc:  # noqa: BLE001 - уборка не должна ломать статус
+            log.warning("Не смог убрать просроченные файлы: %s", exc)
+
     lines = []
+    now = time.time()
     for label, directory in (("оригиналы", cfg.cache_dir), ("клипы", cfg.output_dir)):
         items = describe(Path(directory), minutes)
         total = sum(item["size"] for item in items) / 1048576
@@ -2268,6 +2279,12 @@ def status_text(cfg: Config) -> str:
         for item in items[:8]:
             deadline = float(item.get("delete_at") or 0)  # type: ignore[arg-type]
             left = float(item.get("left_minutes") or 0)  # type: ignore[arg-type]
+            if deadline and deadline <= now:
+                # срок вышел, но файл занят заданием или не успел удалиться
+                lines.append(
+                    f"  · {item['name']} — срок вышел, удалю при следующей уборке"
+                )
+                continue
             when = format_moment(deadline) if deadline else "?"
             lines.append(f"  · {item['name']} — удалится {when} (через {human_duration(left * 60)})")
     cookies = Path(cfg.cookies).expanduser() if cfg.cookies else None
@@ -2276,8 +2293,7 @@ def status_text(cfg: Config) -> str:
         lines.append(f"cookies: обновлены {age:.1f} дн. назад")
     else:
         lines.append("cookies: файла нет — YouTube может требовать авторизацию")
-    running = sum(1 for job in JOBS.values() if job.get("state") == "running")
-    lines.append(f"в работе: {running} задание(й)")
+    lines.append(f"в работе: {running_jobs} задание(й)")
     from .storage import free_mb, read_history, total_mb
 
     out_dir = Path(cfg.output_dir).expanduser()

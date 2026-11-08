@@ -230,6 +230,9 @@ def describe(directory: Path, minutes: int | None = None) -> list[dict[str, obje
     items = []
     now = time.time()
     for path in sorted(directory.rglob("*")):
+        # служебные файлы (кэш адресов потоков) — не «файлы на машине»
+        if path.name == "streams.json":
+            continue
         if path.is_file():
             stat = path.stat()
             item: dict[str, object] = {
