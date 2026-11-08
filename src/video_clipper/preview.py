@@ -151,6 +151,43 @@ def windows_dir(cfg: Config) -> Path:
     return Path(cfg.cache_dir).expanduser() / "preview"
 
 
+def playback_copy(window: Path, offset: float, cfg: Config) -> Path | None:
+    """Копия участка, которая начинается с нуля.
+
+    Участки качаются с -copyts: в файле остаются исходные метки времени
+    (start_time = 917 с), и браузер считает такую шкалу своей — плеер
+    показывает «15:20» и уезжает не туда. Для проигрывания делаем дешёвый
+    remux без перекодирования: метки сдвигаются в ноль, картинка та же.
+    """
+    if offset <= 0.05:
+        return window
+    target = window.with_name("play-" + window.name)
+    try:
+        if target.is_file() and target.stat().st_mtime >= window.stat().st_mtime:
+            return target
+    except OSError:
+        pass
+    args = [
+        cfg.ffmpeg_path if hasattr(cfg, "ffmpeg_path") else "ffmpeg",
+        "-y", "-v", "error",
+        "-i", str(window),
+        "-c", "copy",
+        "-output_ts_offset", f"-{offset:.3f}",
+        "-avoid_negative_ts", "make_zero",
+        "-movflags", "+faststart",
+        str(target),
+    ]
+    try:
+        done = subprocess.run(args, capture_output=True, timeout=90)
+    except (OSError, subprocess.SubprocessError) as exc:
+        log.warning("Копия для проигрывания не сделалась: %s", exc)
+        return None
+    if done.returncode != 0 or not target.is_file() or target.stat().st_size == 0:
+        log.warning("Копия для проигрывания пустая: %s", done.stderr.decode()[:120])
+        return None
+    return target
+
+
 def find_window(source: str, cfg: Config, seconds: float):
     """Готовый участок для этого источника, накрывающий ``seconds``."""
     folder = windows_dir(cfg)

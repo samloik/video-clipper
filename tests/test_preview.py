@@ -176,6 +176,65 @@ class TestPreviewWindow:
         assert end <= 29.8 and start < end
 
 
+class TestPlaybackCopy:
+    """Участок для плеера должен начинаться с нуля, иначе шкала уезжает."""
+
+    def _offset_file(self, tmp_path):
+        import subprocess
+
+        source = tmp_path / "window.mp4"
+        subprocess.run(
+            [
+                "ffmpeg", "-y", "-v", "error",
+                "-f", "lavfi", "-i", "testsrc=size=160x90:rate=10",
+                "-t", "3", "-pix_fmt", "yuv420p", "-c:v", "libx264", "-preset", "ultrafast",
+                "-output_ts_offset", "917.4", str(source),
+            ],
+            check=True,
+        )
+        return source
+
+    def _start_time(self, path):
+        import subprocess
+
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=start_time,duration",
+             "-of", "default=nw=1", str(path)],
+            capture_output=True, text=True, check=True,
+        ).stdout
+        values = dict(line.split("=") for line in out.strip().splitlines())
+        return float(values["start_time"]), float(values["duration"])
+
+    def test_copy_starts_at_zero(self, tmp_path):
+        import shutil
+
+        if not shutil.which("ffmpeg"):
+            pytest.skip("нужен ffmpeg")
+        from video_clipper.config import load_config
+        from video_clipper.preview import playback_copy
+
+        cfg = load_config(tmp_path / "config.json")
+        cfg.with_overrides(cache_dir=tmp_path / "cache")
+        window = self._offset_file(tmp_path)
+        start, _container = self._start_time(window)
+        assert start == 917.4  # исходный участок живёт в шкале ролика
+
+        copy = playback_copy(window, 917.4, cfg)
+        assert copy is not None and copy.is_file()
+        start, copied_duration = self._start_time(copy)
+        assert start == 0.0, "плеер должен видеть шкалу с нуля"
+        assert 2.5 < copied_duration < 3.5, "длительность — это сам участок, без сдвига"
+
+    def test_zero_offset_is_served_as_is(self, tmp_path):
+        from video_clipper.config import load_config
+        from video_clipper.preview import playback_copy
+
+        cfg = load_config(tmp_path / "config.json")
+        window = tmp_path / "plain.mp4"
+        window.write_bytes(b"x")
+        assert playback_copy(window, 0.0, cfg) == window
+
+
 class TestStream:
     """Кадр по ссылке без скачивания: берём прямую ссылку на поток."""
 

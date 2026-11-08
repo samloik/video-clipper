@@ -32,6 +32,7 @@ from .cut import ClipResult, CutCancelled, clamp_horizontal
 from .probe import EnvironmentProblem, check_tools
 from .storage import SweepResult
 from .preview import (
+    playback_copy,
     cached_frame,
     cached_stream,
     unavailable_video,
@@ -1618,9 +1619,10 @@ $('play-seg').addEventListener('click', async () => {
     previewNoteEl.textContent = '';
     return;
   }
-  const offset = Number(play.offset) || 0;
-  const localStart = Math.max(0, start - offset);
-  const localEnd = Math.max(localStart + 0.2, end - offset);
+  // Сервер уже перевёл абсолютное время в шкалу отданного файла: участок
+  // начинается с нуля, поэтому offset тут не нужен вовсе.
+  const localStart = Math.max(0, Number.isFinite(Number(play.start)) ? Number(play.start) : 0);
+  const localEnd = Math.max(localStart + 0.2, localStart + (end - start));
   const token = String(Date.now()) + Math.random();
   playerEl.dataset.token = token;
   playerEl.dataset.from = String(localStart);
@@ -1649,8 +1651,14 @@ $('play-seg').addEventListener('click', async () => {
     playerEl.muted = false;
     previewNoteEl.textContent = 'браузер не дал автозапуск — нажми ▶ в плеере';
   });
-  previewNoteEl.textContent = 'играю ' + fmtTC(start) + ' – ' + fmtTC(start + (end - start)) +
-    ' — это тот же отрезок, что уйдёт в нарезку';
+  const covered = Number(play.covered_end) || 0;
+  if (covered && end > covered + 1) {
+    previewNoteEl.textContent = 'играю с ' + fmtTC(start) + ' до ' + fmtTC(covered) +
+      ' — участок длинный, остальное появится в готовом клипе';
+  } else {
+    previewNoteEl.textContent = 'играю ' + fmtTC(start) + ' – ' + fmtTC(end) +
+      ' — это тот же отрезок, что уйдёт в нарезку';
+  }
 });
 
 async function run() {
@@ -2425,10 +2433,17 @@ def prepare_play(source: str, cfg: Config, wanted: float, until: float | None = 
     if resolved is None:
         return None
     local, local_time, offset, window_end, is_window = resolved
+    # Участок хранится с исходными метками времени: для плеера делаем копию,
+    # которая начинается с нуля, иначе шкала уезжает (15:20 вместо 0:00).
+    play_file, play_offset = Path(local), float(offset)
+    if is_window:
+        copy = playback_copy(Path(local), float(offset), cfg)
+        if copy is not None:
+            play_file, play_offset = copy, 0.0
     return {
-        "path": Path(local),
-        "name": Path(local).name,
-        "offset": float(offset),
+        "path": play_file,
+        "name": play_file.name,
+        "offset": play_offset,
         "start": float(local_time),
         "window": bool(is_window),
         "window_end": float(window_end or 0.0),
@@ -2889,6 +2904,7 @@ def make_handler(
                             "offset": play["offset"],
                             "start": play["start"],
                             "window": play["window"],
+                            "covered_end": play["window_end"],
                             "duration": info.get("duration") or 0,
                         }
                     ),

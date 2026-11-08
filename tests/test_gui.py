@@ -1822,7 +1822,7 @@ class TestServiceEndpoints:
 
         # файл и смещение выбираются одним запросом: два запроса давали разные участки
         assert "/api/preplay?source=" in PAGE
-        assert "play.url" in PAGE and "play.offset" in PAGE
+        assert "play.url" in PAGE and "play.start" in PAGE
         assert "seekPlayer(localStart, token)" in PAGE
         assert "playerEl.dataset.from" in PAGE
         # мобильные браузеры игнорируют seek, пока файл не готов — нужен повтор
