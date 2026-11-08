@@ -30,6 +30,7 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 from .config import Config, apply_retention_override, load_config
 from .cut import ClipResult, CutCancelled, clamp_horizontal
 from .probe import EnvironmentProblem, check_tools
+from .storage import SweepResult
 from .preview import (
     cached_frame,
     cached_stream,
@@ -262,6 +263,7 @@ body{background:var(--bg);color:var(--ink);font:15px/1.5 var(--sans);
   border:1px solid var(--line);border-radius:var(--r);background:var(--panel);
   padding:14px 16px}
 .panel[hidden]{display:none}
+.panel .sweep{margin:10px 16px 14px;width:calc(100% - 32px)}
 .panel-head{display:flex;align-items:center;justify-content:space-between;gap:12px}
 .panel pre{margin:0;flex:1;min-height:0;overflow:auto;white-space:pre-wrap;
   font:12.5px/1.65 var(--mono);color:var(--ink-2)}
@@ -762,6 +764,8 @@ function renderEta(job) {
 
 function showPanel(title, text) {
   $('panel-title').textContent = title;
+  // кнопка уборки относится к прошлому содержимому — иначе остаётся висеть
+  panelEl.querySelectorAll('.sweep').forEach(btn => btn.remove());
   panelText.textContent = text;
   panelEl.hidden = false;
   emptyEl.style.display = 'none';
@@ -783,7 +787,39 @@ async function openPanel(url, title, method) {
     showPanel(title, 'Ошибка: ' + err.message);
   }
 }
-$('btn-status').addEventListener('click', () => openPanel('/api/status', 'Статус'));
+async function openStatus() {
+  showPanel('Статус', 'Загружаю…');
+  try {
+    const res = await fetch('/api/status');
+    const data = await res.json();
+    showPanel('Статус', data.text || '');
+    if (data.expired) addSweepButton(data.expired);
+  } catch (err) {
+    showPanel('Статус', 'Ошибка: ' + err.message);
+  }
+}
+
+function addSweepButton(count) {
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'ghost danger sweep';
+  btn.textContent = 'Удалить просроченные (' + count + ')';
+  btn.addEventListener('click', async () => {
+    btn.disabled = true;
+    btn.textContent = 'Убираю…';
+    try {
+      const res = await fetch('/api/sweep', { method: 'POST' });
+      const data = await res.json();
+      showPanel('Статус', data.text || data.error || '');
+      if (data.expired) addSweepButton(data.expired);
+    } catch (err) {
+      showPanel('Статус', 'Ошибка: ' + err.message);
+    }
+  });
+  panelEl.querySelector('.panel-head').after(btn);
+}
+
+$('btn-status').addEventListener('click', openStatus);
 $('btn-info').addEventListener('click', () => openPanel('/api/info', 'Справка'));
 const confirmEl = $('confirm');
 let confirmResolve = null;
@@ -2278,21 +2314,28 @@ def attachment_header(name: str) -> str:
     )
 
 
+def expired_files(cfg: Config) -> list[Path]:
+    """Просроченные файлы — только посчитать. Удаляет их отдельная команда."""
+    from .storage import expired
+
+    return expired([Path(cfg.cache_dir), Path(cfg.output_dir)], cfg.retention_minutes)
+
+
+def sweep_expired(cfg: Config) -> "SweepResult":
+    """Удалить просроченное по явной команде пользователя."""
+    from .storage import sweep
+
+    return sweep([Path(cfg.cache_dir), Path(cfg.output_dir)], cfg.retention_minutes)
+
+
 def status_text(cfg: Config) -> str:
-    """Что лежит на машине и когда каждый файл исчезнет."""
-    from .storage import describe, sweep
+    """Что лежит на машине и когда каждый файл исчезнет. Ничего не удаляет."""
+    from .storage import describe
     from .timecode import format_moment, format_retention, human_duration
 
     minutes = cfg.retention_minutes
     running_jobs = sum(1 for job in JOBS.values() if job.get("state") == "running")
-    # Просроченные файлы убираем при показе статуса: иначе они висят с «0 с»
-    # и удаляются только при следующей нарезке. Во время работы не трогаем —
-    # там могут быть файлы текущего задания.
-    if running_jobs == 0:
-        try:
-            sweep([Path(cfg.cache_dir), Path(cfg.output_dir)], minutes)
-        except OSError as exc:  # noqa: BLE001 - уборка не должна ломать статус
-            log.warning("Не смог убрать просроченные файлы: %s", exc)
+    overdue = expired_files(cfg)
 
     lines = []
     now = time.time()
@@ -2304,10 +2347,8 @@ def status_text(cfg: Config) -> str:
             deadline = float(item.get("delete_at") or 0)  # type: ignore[arg-type]
             left = float(item.get("left_minutes") or 0)  # type: ignore[arg-type]
             if deadline and deadline <= now:
-                # срок вышел, но файл занят заданием или не успел удалиться
-                lines.append(
-                    f"  · {item['name']} — срок вышел, удалю при следующей уборке"
-                )
+                # срок вышел — но файл лежит, пока пользователь не разрешит уборку
+                lines.append(f"  · {item['name']} — срок вышел")
                 continue
             when = format_moment(deadline) if deadline else "?"
             lines.append(f"  · {item['name']} — удалится {when} (через {human_duration(left * 60)})")
@@ -2317,6 +2358,10 @@ def status_text(cfg: Config) -> str:
         lines.append(f"cookies: обновлены {age:.1f} дн. назад")
     else:
         lines.append("cookies: файла нет — YouTube может требовать авторизацию")
+    if overdue:
+        lines.append(
+            f"просрочено: {len(overdue)} файл(ов) — удалить кнопкой «Удалить просроченные» в GUI или /clean"
+        )
     lines.append(f"в работе: {running_jobs} задание(й)")
     from .storage import free_mb, read_history, total_mb
 
@@ -2641,7 +2686,10 @@ def make_handler(
                 self._send(200, PAGE.encode("utf-8"), "text/html; charset=utf-8")
                 return
             if path == "/api/status":
-                self._send(200, _dumps({"text": status_text(cfg)}))
+                self._send(
+                    200,
+                    _dumps({"text": status_text(cfg), "expired": len(expired_files(cfg))}),
+                )
                 return
             if path in ("/api/vertical", "/api/vertical/auto"):
                 source = (parse_qs(urlparse(self.path).query).get("source") or [""])[0]
@@ -2972,6 +3020,33 @@ def make_handler(
                             "minutes": minutes,
                             "text": f"Храню файлы {format_retention(minutes)} после последнего "
                             f"использования (было {format_retention(was)}).",
+                        }
+                    ),
+                )
+                return
+
+            if parsed.path == "/api/sweep":
+                running = sum(1 for job in JOBS.values() if job.get("state") == "running")
+                if running:
+                    self._send(
+                        409,
+                        _dumps({"error": "Идёт нарезка — уборку сделаю после неё"}),
+                    )
+                    return
+                result = sweep_expired(cfg)
+                note = (
+                    f"Удалено {result.count} файл(ов), освобождено "
+                    f"{result.freed_bytes / 1048576:.1f} МБ\n\n"
+                    if result.count
+                    else "Просроченных файлов нет\n\n"
+                )
+                self._send(
+                    200,
+                    _dumps(
+                        {
+                            "text": note + status_text(cfg),
+                            "removed": result.count,
+                            "expired": len(expired_files(cfg)),
                         }
                     ),
                 )

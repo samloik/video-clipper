@@ -447,7 +447,11 @@ class TestOpenEnd:
 
 
 class TestStatusSweepsExpired:
-    """Просроченные файлы убираются при показе статуса, а не висят с «0 с»."""
+    """Статус только считает просроченное; удаляет отдельная команда.
+
+    Автоуборка при открытии статуса снесла 16 файлов без спроса — так нельзя:
+    удаление запускается только кнопкой «Удалить просроченные» или /clean.
+    """
 
     def _cfg(self, tmp_path, minutes=1):
         cfg = load_config(tmp_path / "config.json")
@@ -457,11 +461,11 @@ class TestStatusSweepsExpired:
         out.mkdir(parents=True, exist_ok=True)
         return cfg.with_overrides(cache_dir=cache, output_dir=out, retention_minutes=minutes)
 
-    def test_expired_files_are_removed(self, tmp_path):
+    def test_status_only_counts_expired_files(self, tmp_path):
         import os
         import time as _time
 
-        from video_clipper.gui import status_text
+        from video_clipper.gui import expired_files, status_text
 
         cfg = self._cfg(tmp_path)
         old = Path(cfg.cache_dir) / "старый-89tlUjUJS3Q.mp4"
@@ -470,9 +474,30 @@ class TestStatusSweepsExpired:
         os.utime(old, (two_hours_ago, two_hours_ago))
 
         text = status_text(cfg)
-        assert not old.exists(), "просроченный файл должен исчезнуть"
+        assert old.exists(), "статус не имеет права удалять файлы"
+        assert len(expired_files(cfg)) == 1
+        assert "просрочено: 1 файл(ов)" in text
         assert "через 0 с" not in text
-        assert "оригиналы: 0 файл(ов)" in text
+        assert "срок вышел" in text
+
+    def test_sweep_removes_expired_only_on_request(self, tmp_path):
+        import os
+        import time as _time
+
+        from video_clipper.gui import sweep_expired
+
+        cfg = self._cfg(tmp_path)
+        old = Path(cfg.cache_dir) / "старый-89tlUjUJS3Q.mp4"
+        old.write_bytes(b"x" * 1024)
+        fresh = Path(cfg.cache_dir) / "свежий-89tlUjUJS3Q.mp4"
+        fresh.write_bytes(b"x")
+        two_hours_ago = _time.time() - 2 * 3600
+        os.utime(old, (two_hours_ago, two_hours_ago))
+
+        result = sweep_expired(cfg)
+        assert result.count == 1
+        assert not old.exists()
+        assert fresh.exists()
 
     def test_fresh_file_stays_with_a_countdown(self, tmp_path):
         from video_clipper.gui import status_text
@@ -1674,6 +1699,40 @@ class TestServiceEndpoints:
         text = json.loads(body)["text"]
         assert "оригиналы" in text and "клипы" in text
         assert "слушаю" in text
+
+    def test_status_does_not_delete_but_reports_expired(self, server_factory, cfg, tmp_path):
+        import os
+        import time as _time
+
+        cfg.cache_dir.mkdir(parents=True, exist_ok=True)
+        old = cfg.cache_dir / "старый-89tlUjUJS3Q.mp4"
+        old.write_bytes(b"x" * 512)
+        stamp = _time.time() - 3 * 3600
+        os.utime(old, (stamp, stamp))
+        base = server_factory(fake_clipper(tmp_path / "c.mp4"))
+
+        status, body = get(base, "/api/status")
+        data = json.loads(body)
+        assert status == 200
+        assert data["expired"] == 1
+        assert old.exists(), "открытие статуса не удаляет файлы"
+
+    def test_sweep_endpoint_deletes_only_on_request(self, server_factory, cfg, tmp_path):
+        import os
+        import time as _time
+
+        cfg.cache_dir.mkdir(parents=True, exist_ok=True)
+        old = cfg.cache_dir / "старый-89tlUjUJS3Q.mp4"
+        old.write_bytes(b"x" * 512)
+        stamp = _time.time() - 3 * 3600
+        os.utime(old, (stamp, stamp))
+        base = server_factory(fake_clipper(tmp_path / "c.mp4"))
+
+        status, data = post_json(base, "/api/sweep", {})
+        assert status == 200
+        assert data["removed"] == 1
+        assert not old.exists()
+        assert data["expired"] == 0
 
     def test_info_is_written_for_the_gui_not_the_chat(self, server_factory, tmp_path):
         base = server_factory(fake_clipper(tmp_path / "c.mp4"))

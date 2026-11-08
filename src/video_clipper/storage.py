@@ -97,6 +97,24 @@ def sweep(dirs: list[Path], minutes: int = DEFAULT_RETENTION_MINUTES) -> SweepRe
     return SweepResult(removed=removed, freed_bytes=freed)
 
 
+def expired(dirs: list[Path], minutes: int = DEFAULT_RETENTION_MINUTES) -> list[Path]:
+    """Files whose retention has run out, newest ignored. Nothing is deleted here."""
+    cutoff = time.time() - minutes * 60
+    found: list[Path] = []
+    for directory in dirs:
+        if not directory or not directory.is_dir():
+            continue
+        for path in sorted(directory.rglob("*")):
+            if not path.is_file() or path.name == "streams.json":
+                continue
+            try:
+                if path.stat().st_mtime < cutoff:
+                    found.append(path)
+            except OSError:  # pragma: no cover - best effort
+                continue
+    return found
+
+
 def touch(path: Path) -> None:
     """Mark a file as used now, so the retention clock restarts."""
     try:
