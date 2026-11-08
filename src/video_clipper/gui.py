@@ -1533,21 +1533,52 @@ $('play-seg').addEventListener('click', () => {
     return;
   }
   playerEl.hidden = false;
-  const offset = (mediaInfo && mediaInfo.offset) ? mediaInfo.offset : 0;
-  const localStart = Math.max(0, start - offset);
-  const localEnd = Math.max(localStart + 0.2, end - offset);
-  playerEl.dataset.start = String(localStart);
-  playerEl.dataset.end = String(localEnd);
-  playerEl.onloadedmetadata = () => { playerEl.currentTime = localStart; };
-  playerEl.muted = false;
-  playerEl.ontimeupdate = () => {
-    if (playerEl.currentTime >= localEnd) {
+  const url = '/api/source?source=' + encodeURIComponent(source) +
+    '&t=' + start.toFixed(2) + '&until=' + end.toFixed(2) + '&_=' + Date.now();
+  // Смещение знает только сервер: отданный файл может начинаться не с нуля
+  // (короткий участок ссылки). Раньше страница ставила currentTime от нуля файла,
+  // и второй «посмотреть отрезок» играл с прежнего места.
+  const infoPromise = fetch(url, { method: 'HEAD' }).then(async res => {
+    if (res.ok) {
+      const raw = res.headers.get('X-Source-Offset');
+      return { offset: raw === null ? NaN : Number(raw) };
+    }
+    let error = '';
+    try { error = (await res.json()).error || ''; } catch (_) {}
+    return { error: error || 'не удалось открыть отрезок' };
+  }).catch(() => ({ offset: NaN }));
+
+  // Каждый показ получает свой токен: ответы прошлого клика не должны двигать новый.
+  const token = String(Date.now()) + Math.random();
+  playerEl.dataset.token = token;
+  playerEl.onloadedmetadata = async () => {
+    if (playerEl.dataset.token !== token) return;
+    const info = await infoPromise;
+    if (playerEl.dataset.token !== token) return;
+    if (info.error) {
       playerEl.pause();
-      playerEl.currentTime = Math.max(localStart, localEnd - 0.05);
+      playerEl.hidden = true;
+      setStatus(info.error, 'err');
+      return;
+    }
+    let offset = info.offset;
+    if (!Number.isFinite(offset)) offset = (mediaInfo && mediaInfo.offset) ? mediaInfo.offset : 0;
+    const localStart = Math.max(0, start - offset);
+    const localEnd = Math.max(localStart + 0.2, end - offset);
+    playerEl.dataset.from = String(localStart);
+    playerEl.dataset.to = String(localEnd);
+    try { playerEl.currentTime = localStart; } catch (_) {}
+  };
+  playerEl.ontimeupdate = () => {
+    if (playerEl.dataset.token !== token) return;
+    const localEnd = Number(playerEl.dataset.to || 0);
+    if (localEnd && playerEl.currentTime >= localEnd) {
+      playerEl.pause();
+      playerEl.currentTime = Math.max(Number(playerEl.dataset.from || 0), localEnd - 0.05);
     }
   };
-  playerEl.src = '/api/source?source=' + encodeURIComponent(source) +
-    '&t=' + start.toFixed(2) + '&_=' + Date.now();
+  playerEl.muted = false;
+  playerEl.src = url;
   // play() зовём прямо в обработчике клика: после await браузер уже не считает это жестом
   playerEl.play().catch(() => {
     previewNoteEl.textContent = 'браузер не дал автозапуск — нажми ▶ в плеере';
@@ -2580,7 +2611,7 @@ def make_handler(
             if self.command != "HEAD":
                 self.wfile.write(body)
 
-        def _serve_media(self, path: Path) -> None:
+        def _serve_media(self, path: Path, extra: dict[str, str] | None = None) -> None:
             """Отдать исходник с поддержкой Range — браузер проигрывает отрезок без нарезки."""
             size = path.stat().st_size
             if not size:
@@ -2617,6 +2648,8 @@ def make_handler(
             if partial:
                 self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
             self.send_header("Cache-Control", "no-store")
+            for name, value in (extra or {}).items():
+                self.send_header(name, value)
             self.end_headers()
             if self.command == "HEAD":
                 return
@@ -2764,6 +2797,24 @@ def make_handler(
                     if broken:
                         self._error(409, broken)
                         return
+                    if path == "/api/source" and source.startswith(("http://", "https://")):
+                        # ссылку нечем играть, пока нет файла: готовим короткий участок
+                        try:
+                            until = float((query.get("until") or [""])[0] or 0) or None
+                        except (TypeError, ValueError):
+                            until = None
+                        try:
+                            ensure_window(source, cfg, wanted, until=until)
+                        except Exception as exc:  # noqa: BLE001 - причину покажем как есть
+                            self._error(409, _preview_error(exc))
+                            return
+                        prepared = resolve_for_time(source, cfg, wanted)
+                        if prepared is None:
+                            self._error(409, "не удалось подготовить участок для проигрывания")
+                            return
+                        local, _local_time, offset, _we, _iw = prepared
+                        self._serve_media(local, {"X-Source-Offset": f"{offset:.3f}"})
+                        return
                     if source.startswith(("http://", "https://")):
                         began = time.monotonic()
                         frame = cached_frame(source, wanted, frame_width)
@@ -2815,7 +2866,9 @@ def make_handler(
                     self._send(200, _dumps(info))
                     return
                 if path == "/api/source":
-                    self._serve_media(local)
+                    # смещение участка: файл может начинаться не с нуля, и без этого
+                    # страница ставила currentTime от начала файла — «перемотка не работает»
+                    self._serve_media(local, {"X-Source-Offset": f"{offset:.3f}"})
                     return
                 key = str(local)
                 frame = cached_frame(key, local_time, frame_width)

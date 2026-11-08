@@ -1734,6 +1734,44 @@ class TestServiceEndpoints:
         assert not old.exists()
         assert data["expired"] == 0
 
+    def test_source_reports_the_window_offset(self, server_factory, cfg, tmp_path):
+        """Страница ставит currentTime от начала файла — сервер обязан сказать смещение."""
+        import json as _json
+
+        windows = cfg.cache_dir / "preview"
+        windows.mkdir(parents=True, exist_ok=True)
+        media = windows / "window-test.mp4"
+        media.write_bytes(b"x" * 2048)
+        (windows / "window-test.json").write_text(
+            _json.dumps(
+                {
+                    "source": "https://example.com/fake",
+                    "file": "window-test.mp4",
+                    "start": 12.0,
+                    "end": 32.0,
+                    "duration": 20.0,
+                }
+            ),
+            encoding="utf-8",
+        )
+        base = server_factory(fake_clipper(tmp_path / "c.mp4"))
+
+        req = urllib.request.Request(
+            base + "/api/source?source=https%3A%2F%2Fexample.com%2Ffake&t=14&until=18",
+            method="HEAD",
+        )
+        with urllib.request.urlopen(req) as response:
+            assert response.status == 200
+            assert response.headers.get("X-Source-Offset") == "12.000"
+
+    def test_play_uses_the_offset_from_the_server(self):
+        from video_clipper.gui import PAGE
+
+        assert "X-Source-Offset" in PAGE, "страница должна спрашивать смещение у сервера"
+        assert "method: 'HEAD'" in PAGE
+        assert "playerEl.currentTime = localStart" in PAGE
+        assert "playerEl.dataset.from" in PAGE
+
     def test_info_is_written_for_the_gui_not_the_chat(self, server_factory, tmp_path):
         base = server_factory(fake_clipper(tmp_path / "c.mp4"))
         status, body = get(base, "/api/info")
