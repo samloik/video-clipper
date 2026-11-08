@@ -91,22 +91,31 @@ def vertical_args(
     layout: str = "crop",
     size: tuple[int, int] = VERTICAL_SIZE,
     horizontal: float = 0.5,
+    burn: str = "",
 ) -> list[str]:
-    """ffmpeg video-filter arguments for a 9:16 frame."""
+    """ffmpeg video-filter arguments for a 9:16 frame.
+
+    ``burn`` — фильтр субтитров, который дописывается ПОСЛЕ кропа: иначе текст
+    выжигался бы в координатах исходного кадра и уезжал за границу 9:16.
+    """
     width, height = size
     x = f"{clamp_horizontal(horizontal):.4f}"
     if layout == "blur":
-        return [
-            "-filter_complex",
-            VERTICAL_BLUR_FILTER.format(
-                w=width,
-                h=height,
-                bw=max(2, width // BLUR_BG_SCALE) // 2 * 2,
-                bh=max(2, height // BLUR_BG_SCALE) // 2 * 2,
-                x=x,
-            ),
-        ]
-    return ["-vf", VERTICAL_CROP_FILTER.format(w=width, h=height, x=x)]
+        expr = VERTICAL_BLUR_FILTER.format(
+            w=width,
+            h=height,
+            bw=max(2, width // BLUR_BG_SCALE) // 2 * 2,
+            bh=max(2, height // BLUR_BG_SCALE) // 2 * 2,
+            x=x,
+        )
+        if burn:
+            # у blur-цепочки результат безымянный: помечаем и вешаем текст на него
+            expr = expr.replace("setsar=1", f"setsar=1[base];[base]{burn}", 1)
+        return ["-filter_complex", expr]
+    crop = VERTICAL_CROP_FILTER.format(w=width, h=height, x=x)
+    if burn:
+        crop = f"{crop},{burn}"
+    return ["-vf", crop]
 
 
 class CutError(RuntimeError):
@@ -134,6 +143,37 @@ class ClipResult:
         }
 
 
+def subtitle_filter(subtitles: str | Path, style: str | None = None) -> str:
+    """Фильтр выжигания субтитров: путь экранируется, стиль задаётся явно."""
+    from .subtitles import escape_for_ffmpeg
+
+    expr = f"subtitles=filename='{escape_for_ffmpeg(subtitles)}'"
+    if style:
+        expr += f":force_style='{style}'"
+    return expr
+
+
+def subtitle_style(height: int | None = None, vertical: bool = False) -> str:
+    """Кегль и поля: на 9:16 шрифт крупнее и выше от края.
+
+    У libass размер шрифта задаётся не в пикселях кадра, а в единицах сценария
+    (для SRT это 384x288), которые потом масштабируются под видео. Поэтому
+    «FontSize=79» на 720x1280 дал гигантские буквы во весь кадр — считать надо
+    в единицах 288, а не в пикселях.
+    """
+    script_height = 288
+    size = round(script_height * (0.075 if vertical else 0.050))
+    margin = round(script_height * (0.110 if vertical else 0.080))
+    return (
+        "FontName=DejaVu Sans,"
+        f"FontSize={size},"
+        "PrimaryColour=&H00FFFFFF,"
+        "OutlineColour=&H00000000,"
+        "BorderStyle=1,Outline=2,Shadow=0,"
+        f"Alignment=2,MarginV={margin}"
+    )
+
+
 def build_ffmpeg_command(
     src: str | Path,
     out: str | Path,
@@ -145,6 +185,9 @@ def build_ffmpeg_command(
     layout: str = "crop",
     vertical_size: tuple[int, int] = VERTICAL_SIZE,
     horizontal: float = 0.5,
+    subtitles: str | Path | None = None,
+    subtitle_style_str: str | None = None,
+    subtitle_height: int | None = None,
 ) -> list[str]:
     """Build the ffmpeg argv for one segment.
 
@@ -161,13 +204,22 @@ def build_ffmpeg_command(
         "-i", str(src),
         "-t", f"{seg.duration:.3f}",
     ]
-    if fast and not vertical:
+    style = None
+    if subtitles:
+        # выжигание текста — всегда перекодирование, даже если просили fast
+        style = subtitle_style_str or subtitle_style(
+            subtitle_height or (vertical_size[1] if vertical else None), vertical
+        )
+    if fast and not vertical and not subtitles:
         cmd += FAST_ARGS
     else:
         # Vertical mode always re-encodes: cropping cannot be stream-copied.
         cmd += ACCURATE_VIDEO_ARGS
+        burn = subtitle_filter(subtitles, style) if subtitles else ""
         if vertical:
-            cmd += vertical_args(layout, vertical_size, horizontal)
+            cmd += vertical_args(layout, vertical_size, horizontal, burn=burn)
+        elif burn:
+            cmd += ["-vf", burn]
         cmd += ACCURATE_AUDIO_ARGS if has_audio else ["-an"]
         # Re-encoded output may start at a negative PTS offset; zero it.
         # With -c copy this option inflates the duration by the seek offset,
@@ -419,6 +471,9 @@ def cut_segment(
     cancel: Any = None,
     on_process: Callable[[Any], None] | None = None,
     horizontal: float = 0.5,
+    subtitles: str | Path | None = None,
+    subtitle_style_str: str | None = None,
+    subtitle_height: int | None = None,
 ) -> ClipResult:
     """Run ffmpeg for one segment and return the result."""
     out_path = Path(out)
@@ -434,10 +489,15 @@ def cut_segment(
         layout=layout,
         vertical_size=vertical_size,
         horizontal=horizontal,
+        subtitles=subtitles,
+        subtitle_style_str=subtitle_style_str,
+        subtitle_height=subtitle_height,
     )
-    mode = "fast" if fast and not vertical else "accurate"
+    mode = "fast" if fast and not vertical and not subtitles else "accurate"
     if vertical:
         mode += "+vertical" if layout != "blur" else "+vertical-blur"
+    if subtitles:
+        mode += "+subs"
     log.info("Нарезка %s: %s → %s", mode, seg.label, out_path.name)
     log.debug("ffmpeg: %s", " ".join(cmd))
 

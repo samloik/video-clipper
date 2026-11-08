@@ -51,6 +51,14 @@ def run_pipeline(args: Any, cfg: Config) -> list[ClipResult]:
     horizontal = 0.5
     if getattr(args, "krop", None) is not None:
         horizontal = max(0.0, min(1.0, float(args.krop) / 100))
+    subs_path = getattr(args, "subs", None)
+    subs_cues = None
+    if subs_path:
+        from .subtitles import parse_subtitles
+
+        # разбираем один раз: у многосегментной нарезки файл общий
+        subs_cues = parse_subtitles(subs_path)
+        log.info("Субтитров в файле: %d реплик", len(subs_cues))
     dry_run = bool(getattr(args, "dry_run", False))
     keep_source = bool(getattr(args, "keep_source", False)) or cfg.keep_source
     source_value = str(args.source)
@@ -117,6 +125,15 @@ def run_pipeline(args: Any, cfg: Config) -> list[ClipResult]:
             out_path = out_dir / vertical_name(
                 clip_filename(src.title, source_value, shown, name), vertical, layout, horizontal
             )
+            size = pick_vertical_size(
+                src.info.height, cfg.vertical_width, cfg.vertical_height
+            )
+            segment_subs = None
+            if subs_cues:
+                # субтитры размечены по исходному ролику — берём исходные времена
+                segment_subs = _segment_subtitles(
+                    subs_cues, shown, out_path, out_dir, cfg
+                )
             result = cut_segment(
                 str(src.path),
                 out_path,
@@ -126,10 +143,10 @@ def run_pipeline(args: Any, cfg: Config) -> list[ClipResult]:
                 has_audio=src.info.has_audio,
                 vertical=vertical,
                 layout=layout,
-                vertical_size=pick_vertical_size(
-                    src.info.height, cfg.vertical_width, cfg.vertical_height
-                ),
+                vertical_size=size,
                 horizontal=horizontal,
+                subtitles=segment_subs,
+                subtitle_height=size[1] if vertical else src.info.height,
             )
             result.segment = shown
             results.append(result)
@@ -139,6 +156,26 @@ def run_pipeline(args: Any, cfg: Config) -> list[ClipResult]:
             src.cleanup()
         else:
             touch(src.path)
+
+
+def _segment_subtitles(
+    cues, shown: Segment, out_path: Path, out_dir: Path, cfg: Config
+) -> Path | None:
+    """Временный .srt ровно под этот отрезок: реплики сдвинуты к нулю."""
+    from .subtitles import SubtitleError, cues_for_segment, render_srt
+
+    try:
+        picked = cues_for_segment(cues, shown.start, shown.end)
+    except Exception:  # noqa: BLE001 - субтитры не должны ломать нарезку
+        return None
+    if not picked:
+        log.warning("В отрезке %s нет реплик — режу без субтитров", shown.label)
+        return None
+    folder = Path(cfg.cache_dir).expanduser() / "subs"
+    folder.mkdir(parents=True, exist_ok=True)
+    target = folder / f"{out_path.stem}.srt"
+    target.write_text(render_srt(picked), encoding="utf-8")
+    return target
 
 
 def _planned(

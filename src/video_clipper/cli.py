@@ -64,6 +64,11 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="0..100",
         help="где стоит окно 9:16 по горизонтали: 0 — левый край, 50 — центр (по умолчанию), 100 — правый",
     )
+    p.add_argument(
+        "--subs",
+        help="файл субтитров исходного ролика (.srt или .vtt): реплики отрезка "
+        "выжигаются в кадр, таймкоды сдвигаются к началу клипа",
+    )
     p.add_argument("--keep-source", action="store_true", help="сохранить скачанный оригинал в cache/")
     p.add_argument("--output-dir", help="каталог для готовых фрагментов")
     p.add_argument("--resolution", type=int, help="максимальное разрешение при скачивании, например 720")
