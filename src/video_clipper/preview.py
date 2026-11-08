@@ -431,6 +431,9 @@ def _stream_info_locked(source: str, cfg: Config) -> tuple[str, dict]:
         "width": int(info.get("width") or 0),
         "height": int(info.get("height") or 0),
         "fps": float(info.get("fps") or 0.0),
+        # Название нужно для имени файла: без него клип назывался
+        # «window-38-90-7844» — именем временного участка
+        "title": str(info.get("title") or ""),
         # CDN отдаёт видео только своему клиенту: с чужим User-Agent ffmpeg
         # получает пустой поток — это проверено на живом ролике
         "user_agent": (info.get("http_headers") or {}).get("User-Agent", ""),

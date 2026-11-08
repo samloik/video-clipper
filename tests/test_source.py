@@ -278,6 +278,46 @@ def clear_meta_cache():
     source_module.clear_challenge()
 
 
+class TestWindowTitle:
+    """Имя клипа — название ролика, а не имя временного участка."""
+
+    def _run(self, tmp_path, monkeypatch, meta_title, site_title):
+        import video_clipper.source as source_module
+
+        window = tmp_path / "segment.mp4"
+        window.write_bytes(b"x")
+
+        def fake_window(url, cfg, start, end, out_dir):
+            return window, 10.0, {"title": meta_title, "duration": 100.0}
+
+        monkeypatch.setattr(source_module, "download_window", fake_window)
+        monkeypatch.setattr(
+            source_module, "fetch_metadata",
+            lambda url, cfg: {"title": site_title, "duration": 1000.0},
+        )
+        cfg = _clean_config().with_overrides(cache_dir=tmp_path / "cache", use_sections=True)
+
+        def downloader(url, opts):
+            if opts.get("skip_download"):
+                return {"duration": 1000.0}
+            raise AssertionError("yt-dlp не должен качать")
+
+        return prepare_source("https://youtu.be/89tlUjUJS3Q", cfg, segments=[(38, 90)],
+                              downloader=downloader)
+
+    def test_title_comes_from_the_stream(self, tmp_path, monkeypatch):
+        src = self._run(tmp_path, monkeypatch, "Название из потока", "Из сайта")
+        assert src.title == "Название из потока"
+
+    def test_falls_back_to_site_metadata(self, tmp_path, monkeypatch):
+        src = self._run(tmp_path, monkeypatch, "", "Название с сайта")
+        assert src.title == "Название с сайта"
+
+    def test_window_stem_is_never_a_title(self, tmp_path, monkeypatch):
+        src = self._run(tmp_path, monkeypatch, "window-38-90-7844", "")
+        assert src.title == "89tlUjUJS3Q", "вместо имени временного файла — id ролика"
+
+
 class TestWindowDownload:
     """Участок берём прямо из потока (ffmpeg + Range), а не через yt-dlp-секции."""
 

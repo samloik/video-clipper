@@ -17,7 +17,7 @@ from .config import Config
 from .probe import MediaInfo, probe_media
 from .segments import Segment
 from .timecode import format_timecode
-from .storage import find_cached_source
+from .storage import find_cached_source, video_id_from_url
 
 log = logging.getLogger("video_clipper")
 
@@ -530,7 +530,21 @@ def _download(
                 url, cfg, min(s for s, _ in segments), max(e for _, e in segments),
                 cache_dir / "sections",
             )
-            info = probe_media(str(window_path), cfg.ffprobe_path)
+            title = str(window_meta.get("title") or "").strip()
+            if not title or title.startswith("window-"):
+                try:
+                    title = str(fetch_metadata(url, cfg).get("title") or "").strip()
+                except Exception:  # noqa: BLE001 - имя не критично
+                    title = ""
+            try:
+                info = probe_media(str(window_path), cfg.ffprobe_path)
+            except Exception as exc:  # noqa: BLE001 - битый файл не должен ломать нарезку
+                log.info("Паспорт участка не прочитался: %s", str(exc)[:120])
+                info = MediaInfo(
+                    duration=max(0.0, float(max(e for _, e in segments)) - window_offset),
+                    has_video=True,
+                    has_audio=True,
+                )
             # У файла с -copyts длительность в контейнере включает start_time:
             # для остального кода нужна длина самого участка.
             if window_offset > 0 and info.duration:
@@ -541,7 +555,7 @@ def _download(
             )
             return Source(
                 path=window_path,
-                title=str(window_meta.get("title") or window_path.stem),
+                title=title or (video_id_from_url(url) or "видео"),
                 is_temporary=True,
                 info=info,
                 url=url,

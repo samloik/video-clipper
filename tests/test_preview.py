@@ -197,7 +197,7 @@ class TestStream:
         assert url == "https://cdn.example/x.mp4"
         assert meta == {
             "duration": 63.0, "width": 360, "height": 450, "fps": 30.0,
-            "user_agent": "Mozilla/5.0 test",
+            "title": "", "user_agent": "Mozilla/5.0 test",
         }
 
     def test_stream_info_is_cached(self, tmp_path, monkeypatch):
@@ -288,6 +288,19 @@ class TestStream:
             thread.join()
         assert len(calls) == 1, "второй поток берёт уже полученный адрес"
         assert len(results) == 2
+
+    def test_stream_metadata_carries_the_title(self, tmp_path, monkeypatch):
+        """Название ролика нужно для имени клипа, а не «window-38-90-7844»."""
+        import video_clipper.source as source_module
+
+        monkeypatch.setattr(
+            source_module, "_ytdlp_extract",
+            lambda url, opts: {"url": "https://cdn.example/t.mp4", "duration": 100.0,
+                               "width": 640, "height": 360, "fps": 25.0,
+                               "title": "Дефолты в России"},
+        )
+        _, meta = stream_info("https://youtu.be/TITLE1", self._cfg(tmp_path))
+        assert meta["title"] == "Дефолты в России"
 
     def test_missing_small_format_falls_back_to_any(self, tmp_path, monkeypatch):
         """«Requested format is not available» — не приговор: просим любой формат."""
