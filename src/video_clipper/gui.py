@@ -1548,6 +1548,9 @@ async function stepField(field, delta) {
   input.value = fmtTC(next);
   syncPreset();
   schedulePreview();
+  // Плеер не знает, что границы поменяли: без перезапуска он продолжает
+  // играть прежний отрезок и «не двигается» на новое время.
+  schedulePlay();
   if (fromEnd) {
     setStatus('«До конца» заменено на точный конец: ' + input.value +
       ' (ролик длится ' + fmtTC(known) + ')');
@@ -1576,6 +1579,17 @@ $('prep-frames').addEventListener('click', () => {
   $('prep-frames').hidden = true;
   preparePreview(startSec, endSec);
 });
+
+let playTimer = null;
+function schedulePlay() {
+  // Плеер уже открыт — значит человек смотрит отрезок; новое время должно
+  // подхватиться само, иначе картинка остаётся от прошлого положения.
+  if (!playerEl || playerEl.hidden) return;
+  clearTimeout(playTimer);
+  playTimer = setTimeout(() => {
+    if (!playerEl.hidden) $('play-seg').click();
+  }, 320);
+}
 
 // Мобильные браузеры молча игнорируют seek, пока файл не готов: пробуем, пока не встанет.
 function seekPlayer(target, token) {

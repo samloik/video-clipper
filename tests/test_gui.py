@@ -1672,6 +1672,18 @@ class TestRetention:
         assert "Хранение" in text or "хранение" in text
 
 
+class TestPlayerFollowsTheStepper:
+    """Шаг границы на секунду должен двигать и открытый плеер."""
+
+    def test_stepping_restarts_the_open_player(self):
+        from video_clipper.gui import PAGE
+
+        assert "function schedulePlay" in PAGE
+        # шаг меняет поле → плеер обязан перезагрузить отрезок, иначе картинка старая
+        assert "schedulePreview();\n  // Плеер не знает, что границы поменяли" in PAGE
+        assert "if (!playerEl.hidden) $('play-seg').click();" in PAGE
+
+
 class TestVerticalPreview:
     """Перед нарезкой видно, что именно попадёт в вертикальный клип."""
 
