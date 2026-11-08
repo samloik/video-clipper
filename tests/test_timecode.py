@@ -20,7 +20,9 @@ class TestParseTimecode:
     def test_two_parts_are_minutes_and_seconds(self):
         """Hours are never assumed: "34:43" is 34 min 43 s, not 34 h 43 min."""
         assert parse_timecode("34:43") == 34 * 60 + 43
-        assert parse_timecode("12.5") == 12 * 60 + 5
+        # точка — доли секунды, поэтому «12.5» это 12.5 с, а не 12:05
+        assert parse_timecode("12.5") == 12.5
+        assert parse_timecode("12,5") == 12 * 60 + 5
 
     def test_minutes_seconds(self):
         assert parse_timecode("1:12") == 72.0
@@ -30,17 +32,30 @@ class TestParseTimecode:
         assert parse_timecode("01:02:03") == 3723.0
         assert parse_timecode("1:02:03.125") == 3723.125
 
-    @pytest.mark.parametrize("text", ["1:12", "1,12", "1.12", "1/12", "1\\12"])
+    @pytest.mark.parametrize("text", ["1:12", "1,12", "1/12", "1\\12"])
     def test_any_separator_splits_the_parts(self, text):
-        """",", ".", "/" and "\\" work exactly like ":"."""
+        """,", "/" and "\\" work exactly like ":"; a dot does not."""
         assert parse_timecode(text) == 72.0
+
+    def test_a_dot_is_always_a_fraction(self):
+        """Точка — доли секунды, а не граница частей (это просил пользователь)."""
+        assert parse_timecode("1.12") == 1.12
+        assert parse_timecode("0:29.1") == 29.1
+
+    def test_four_digits_after_the_dot_are_a_typo(self):
+        """Раньше шаг кадра давал «0:29.1000», и это читалось как 29 мин 1000 с."""
+        with pytest.raises(ValueError) as exc:
+            parse_timecode("0:29.1000")
+        assert "до трёх цифр" in str(exc.value)
+        with pytest.raises(ValueError):
+            parse_timecode("1.2500")
 
     def test_comma_splits_like_a_colon(self):
         assert parse_timecode("1:12,5") == 1 * 3600 + 12 * 60 + 5
 
     @pytest.mark.parametrize(
         "text, expected",
-        [("1:12.500", 72.5), ("00:00:10.5", 10.5), ("0.500", 0.5), ("0.30", 30.0)],
+        [("1:12.500", 72.5), ("00:00:10.5", 10.5), ("0.500", 0.5), ("0.30", 0.3)],
     )
     def test_fraction_needs_three_digits_or_a_full_timecode(self, text, expected):
         assert parse_timecode(text) == expected

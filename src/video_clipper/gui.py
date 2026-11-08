@@ -1002,17 +1002,37 @@ function modeName(mode) {
 function toSeconds(text) {
   const raw = String(text).trim();
   if (!raw) return 0;
-  // три цифры после разделителя — это миллисекунды, а не ещё одна часть таймкода
-  const guarded = raw.replace(new RegExp('[,.:]([0-9]{3})(?![0-9])', 'g'), '§$1');
-  // обратную косую черту, точку, запятую и слэш приводим к двоеточию без регулярок:
-  // в HTML-строке Python экранирование съедает «\\», и класс символов ломается
-  let normal = guarded.split(String.fromCharCode(92)).join(':');
-  normal = normal.split('.').join(':').split(',').join(':').split('/').join(':');
-  const parts = normal.split(':').filter(part => part !== '')
-    .map(part => parseFloat(part.replace('§', '.')) || 0);
-  if (parts.length === 1) return parts[0];
-  if (parts.length === 2) return parts[0] * 60 + parts[1];
-  return parts[0] * 3600 + parts[1] * 60 + parts[2];
+  // Точка — не разделитель частей, а начало долей секунды (до трёх цифр).
+  // «0:29.1000» (так раньше выглядел шаг кадра) — ошибка, а не 29 мин 1000 с.
+  let body = raw, frac = 0;
+  // точку ищем строковыми средствами: регулярка в HTML-строке Python теряет «\\»
+  const dotAt = raw.lastIndexOf('.');
+  if (dotAt !== -1) {
+    const digits = raw.slice(dotAt + 1);
+    if (digits.length > 3) return NaN;
+    if (digits && !Number.isFinite(Number(digits))) return NaN;
+    frac = digits ? Number('0.' + digits) : 0;
+    body = raw.slice(0, dotAt);
+  }
+  // запятую, слэш и обратную косую черту считаем двоеточием
+  let normal = body.split(String.fromCharCode(92)).join(':');
+  normal = normal.split(',').join(':').split('/').join(':');
+  const parts = normal.split(':').filter(part => part !== '');
+  if (!parts.length) return frac;
+  const nums = parts.map(part => {
+    const value = parseFloat(part);
+    return Number.isFinite(value) ? value : NaN;
+  });
+  if (nums.some(value => !Number.isFinite(value))) return NaN;
+  if (nums.length === 1) return nums[0] + frac;
+  if (nums.length === 2) return nums[0] * 60 + nums[1] + frac;
+  return nums[0] * 3600 + nums[1] * 60 + nums[2] + frac;
+}
+
+function tcProblem(text) {
+  if (!String(text).trim() || String(text).trim() === '*') return '';
+  if (Number.isFinite(toSeconds(text))) return '';
+  return 'Таймкод «' + String(text).trim() + '» не понят: после точки — до трёх цифр (доли секунды)';
 }
 
 function startTimer() {
@@ -1107,6 +1127,8 @@ function renderSegments() {
 $('add-seg').addEventListener('click', () => {
   const start = $('start').value.trim(), end = $('end').value.trim();
   if (!start || !end) { setStatus('Заполни начало и конец, потом добавляй', 'err'); return; }
+  const bad = tcProblem(start) || tcProblem(end);
+  if (bad) { setStatus(bad, 'err'); return; }
   if (end !== '*' && toSeconds(end) <= toSeconds(start)) {
     setStatus('Конец должен быть больше начала', 'err'); return;
   }
@@ -1115,10 +1137,6 @@ $('add-seg').addEventListener('click', () => {
   $('end').value = '';
   renderSegments();
   setStatus('Отрезок в списке — добавь ещё или нажми «Нарезать»');
-});
-document.querySelector('.presets .to-end').addEventListener('click', () => {
-  $('end').value = '*';
-  markPreset(null);
 });
 function syncPreset() {}
 [$('start'), $('end')].forEach(el => el.addEventListener('input', syncPreset));
@@ -1130,11 +1148,12 @@ let mediaInfo = null, previewTimer = null;
 function frameStep() { return mediaInfo && mediaInfo.fps ? 1 / mediaInfo.fps : 0.04; }
 
 function fmtTC(seconds) {
-  const s = Math.max(0, seconds);
-  const m = Math.floor(s / 60);
-  const rest = s - m * 60;
-  const whole = Math.floor(rest);
-  const ms = Math.round((rest - whole) * 1000);
+  // считаем в целых миллисекундах: иначе округление давало «.1000»
+  const totalMs = Math.round(Math.max(0, seconds) * 1000);
+  const m = Math.floor(totalMs / 60000);
+  const restMs = totalMs - m * 60000;
+  const whole = Math.floor(restMs / 1000);
+  const ms = restMs % 1000;
   const tail = String(whole).padStart(2, '0') +
     (ms ? '.' + String(ms).padStart(3, '0') : '');
   return m + ':' + tail;
@@ -1416,7 +1435,10 @@ async function stepField(field, delta) {
     fromEnd = true;
   } else {
     base = toSeconds(raw || '0');
-    if (!Number.isFinite(base)) return;
+    if (!Number.isFinite(base)) {
+      setStatus(tcProblem(raw), 'err');
+      return;
+    }
   }
   const known = (mediaInfo && mediaInfo.duration) || 0;
   let next = Math.max(0, base + delta);
@@ -1510,6 +1532,8 @@ async function run() {
   } else {
     const start = $('start').value.trim(), end = $('end').value.trim();
     if (!start || !end) { setStatus('Нужны начало и конец', 'err'); emptyEl.style.display = ''; return; }
+    const bad = tcProblem(start) || tcProblem(end);
+    if (bad) { setStatus(bad, 'err'); emptyEl.style.display = ''; return; }
     segments = [{ start, end }];
   }
   const body = {

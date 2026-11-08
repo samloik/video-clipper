@@ -1,13 +1,15 @@
 """Timecode parsing and formatting.
 
-Accepted input uses any of ``:`` ``,`` ``.`` ``/`` ``\\`` as the component
-separator, all of them equivalent: ``45``, ``0:45``, ``34:43``, ``1.12``,
-``1/12`` and ``1\\12``. One part is seconds, two are minutes and seconds, three
-are hours, minutes and seconds. An edge part may be omitted — ``:12`` is 0:12,
-``45:`` is 0:45 — while a hole in the middle (``1::30``) is a typo and rejected.
-A final group of exactly three digits after a dot or a comma is milliseconds:
-``1:12.500`` is 72.5 s, ``0.500`` is 0.5 s, but ``0.30`` is 0:30 because two
-digits are read as seconds.
+Component separators are ``:`` ``,`` ``/`` and ``\\``, all equivalent: ``45``,
+``0:45``, ``34:43``, ``1/12`` and ``1\\12``. One part is seconds, two are
+minutes and seconds, three are hours, minutes and seconds. An edge part may be
+omitted — ``:12`` is 0:12, ``45:`` is 0:45 — while a hole in the middle
+(``1::30``) is a typo and rejected.
+
+A dot is never a separator: it always starts the fraction of a second, from one
+to three digits (``1:12.500`` = 72.5 s, ``1:12.5`` = 72.5 s, ``0.30`` = 0.3 s).
+Four digits after the dot are a mistake: a frame step used to produce
+``0:29.1000``, which was then read as 29 min 1000 s.
 
 Negative values, empty strings and anything that is not a timecode are rejected
 with a message that names the offending value.
@@ -18,12 +20,11 @@ from __future__ import annotations
 import re
 import time
 
-# Every character people use instead of ":" in the chat.
-_SEPARATOR_RE = re.compile(r"[:\\/,.]")
-# A trailing group after a dot or a comma is a fraction of a second when it has
-# exactly three digits ("1:12.500") or when reading it as a component would make
-# four parts ("00:00:10.5"). "0.30" stays 0:30 — two digits are seconds.
-_FRACTION_RE = re.compile(r"([.,])(\d{1,3})$")
+# Every character people use instead of ":" in the chat. A dot is deliberately
+# absent: it means the fraction of a second, never a part boundary.
+_SEPARATOR_RE = re.compile(r"[:\\/,]")
+# A trailing ".ddd" after the last part is a fraction of a second (1..3 digits).
+_FRACTION_RE = re.compile(r"\.(\d*)$")
 
 
 def parse_timecode(value: str | int | float) -> float:
@@ -44,10 +45,13 @@ def parse_timecode(value: str | int | float) -> float:
     millis = 0
     fraction_match = _FRACTION_RE.search(raw)
     if fraction_match:
-        digits = fraction_match.group(2)
-        if len(digits) == 3 or len(_SEPARATOR_RE.split(raw)) == 4:
-            millis = int(digits.ljust(3, "0"))
-            raw = raw[: fraction_match.start()]
+        digits = fraction_match.group(1)
+        if len(digits) > 3:
+            raise ValueError(
+                f"Некорректный таймкод: {value!r} (после точки — до трёх цифр, это доли секунды)"
+            )
+        millis = int(digits.ljust(3, "0")) if digits else 0
+        raw = raw[: fraction_match.start()]
 
     parts = _SEPARATOR_RE.split(raw)
     if len(parts) > 3:

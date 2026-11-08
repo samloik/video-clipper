@@ -1083,11 +1083,12 @@ class TestTimecodeParserInPage:
         script = self._function() + (
             "\nconsole.log(JSON.stringify([toSeconds('0:02.040'), toSeconds('1.12'),"
             " toSeconds('12.500'), toSeconds('1:02:03'), toSeconds('45'),"
-            " toSeconds('0:10-0:20'.split('-')[0])]));"
+            " toSeconds('0:10-0:20'.split('-')[0]), toSeconds('0:29.1000')]));"
         )
         out = subprocess.run([node, "-e", script], capture_output=True, text=True)
         assert out.returncode == 0, out.stderr
-        assert json.loads(out.stdout) == [2.04, 72, 12.5, 3723, 45, 10]
+        # «0:29.1000» — не таймкод (после точки не больше трёх цифр), отсюда null
+        assert json.loads(out.stdout) == [2.04, 1.12, 12.5, 3723, 45, 10, None]
 
 
 class TestPreview:
