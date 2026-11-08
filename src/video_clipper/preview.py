@@ -172,7 +172,9 @@ def find_window(source: str, cfg: Config, seconds: float):
     return None
 
 
-def ensure_window(source: str, cfg: Config, seconds: float, until=None, progress=None):
+def ensure_window(
+    source: str, cfg: Config, seconds: float, until=None, progress=None, deadline=None
+):
     """Кадры для ссылки: найти участок или скачать короткий кусок вокруг времени.
 
     ``until`` — конец запрошенного отрезка: если он дальше окна по умолчанию,
@@ -187,10 +189,12 @@ def ensure_window(source: str, cfg: Config, seconds: float, until=None, progress
         found = find_window(source, cfg, seconds)
         if found is not None and (until is None or until <= found[2]):
             return found
-        return _download_window(source, cfg, seconds, until, progress)
+        return _download_window(source, cfg, seconds, until, progress, deadline)
 
 
-def _download_window(source: str, cfg: Config, seconds: float, until, progress=None):
+def _download_window(
+    source: str, cfg: Config, seconds: float, until, progress=None, deadline=None
+):
     """Скачать участок для кадров: сначала прямой Range, потом yt-dlp."""
     from .source import download_window
 
@@ -220,12 +224,12 @@ def _download_window(source: str, cfg: Config, seconds: float, until, progress=N
         # Прямой Range-запрос: на живом ролике 40 с видео — 5 с вместо минут
         path, offset, _meta = download_window(source, cfg, start, end, folder)
         length = float(probe_media(path).get("duration") or 0.0)
-    except Exception as exc:  # noqa: BLE001 - откат на yt-dlp-секции
-        log.info("Быстрый участок не вышел (%s) — тяну через yt-dlp", str(exc)[:120])
-        from .source import download_section
-
-        path, offset = download_section(source, cfg, start, end, folder, progress)
-        length = float(probe_media(path).get("duration") or 0.0)
+    except Exception as exc:  # noqa: BLE001 - быстрый путь не вышел
+        # Предпросмотр — не место для медленного yt-dlp: его запасная загрузка
+        # занимает минуты, и человек всё это время видит пустые рамки. Честно
+        # говорим причину; сама нарезка по-прежнему умеет качать через yt-dlp.
+        log.info("Участок для кадров не скачался (%s)", str(exc)[:120])
+        raise
     if length <= 0:
         # паспорт файла не прочитался — считаем, что участок дошёл до запрошенного конца
         length = max(0.0, float(end) - float(offset))
@@ -331,6 +335,18 @@ def _save_disk_stream(source: str, url: str, meta: dict, cfg: Config) -> None:
         pass
 
 
+_STREAM_FAILURES: dict[str, tuple[float, str]] = {}
+STREAM_FAILURE_TTL = 180.0
+
+
+def stream_failure(source: str) -> str:
+    """Недавняя причина, по которой поток не дался (без нового запроса)."""
+    entry = _STREAM_FAILURES.get(source)
+    if not entry or time.time() >= entry[0]:
+        return ""
+    return entry[1]
+
+
 def stream_info(source: str, cfg: Config) -> tuple[str, dict]:
     """Прямая ссылка на поток: кадр можно взять без скачивания файла.
 
@@ -338,12 +354,16 @@ def stream_info(source: str, cfg: Config) -> tuple[str, dict]:
     кэшируем недолго — в памяти и на диске (второй заказ того же ролика
     не должен снова попадать под бот-чек).
     """
+    known = stream_failure(source)
+    if known:
+        raise RuntimeError(known)
     with _source_lock(source):
         try:
             return _stream_info_locked(source, cfg)
-        except Exception:
+        except Exception as exc:
             saved = _load_disk_stream(source, cfg)
             if saved is None:
+                _STREAM_FAILURES[source] = (time.time() + STREAM_FAILURE_TTL, str(exc))
                 raise
             log.info("Сайт не отдал поток — беру адрес из прошлого запроса")
             _STREAM_CACHE[source] = (time.time(), saved[0], saved[1])
@@ -362,7 +382,12 @@ def _stream_info_locked(source: str, cfg: Config) -> tuple[str, dict]:
         "skip_download": True,
         # сначала видеодорожка, потом что угодно: для кадра звук не нужен
         "format": STREAM_FORMAT,
-        "socket_timeout": 10,
+        "socket_timeout": 8,
+        # Это проба ради адреса потока, а не загрузка: внутренние повторы yt-dlp
+        # превращали «формат недоступен» в минуту ожидания на каждую попытку.
+        "retries": 0,
+        "extractor_retries": 0,
+        "fragment_retries": 0,
     }
     # Один клиент за попытку. Перебор клиентов подряд злит YouTube: каждый лишний
     # запрос повышает шанс бот-чека. mweb — единственный, который на этой сети

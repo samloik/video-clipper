@@ -1152,10 +1152,16 @@ function fmtTC(seconds) {
   return m + ':' + tail;
 }
 
+let frameUntil = null;   // конец отрезка: окно накрывает обе рамки одной загрузкой
+
 function frameUrl(tc) {
   const t = Math.max(0, toSeconds(tc));
-  return '/api/frame?source=' + encodeURIComponent(currentSource()) +
-    '&t=' + t.toFixed(3) + '&w=360&_=' + Date.now();
+  let url = '/api/frame?source=' + encodeURIComponent(currentSource()) +
+    '&t=' + t.toFixed(3) + '&w=360';
+  if (typeof frameUntil === 'number' && frameUntil > t) {
+    url += '&until=' + frameUntil.toFixed(3);
+  }
+  return url + '&_=' + Date.now();
 }
 
 async function loadFrame(img, tc, onMissing, noteEl, suffix) {
@@ -1193,11 +1199,11 @@ async function loadFrame(img, tc, onMissing, noteEl, suffix) {
   };
   let deadline = null;
   warmup = setTimeout(showBusy, 160);
-  // страховка на зависшее соединение: сервер укладывается в 45 с, но если ответ
+  // страховка на зависшее соединение: сервер укладывается в 45–60 с, но если ответ
   // вообще не придёт, вертушка не должна крутиться минутами
   deadline = setTimeout(() => {
-    if (fresh()) { hideBusy(); mark('· сервер не успел за 45 с — нажми ещё раз'); }
-  }, 45000);
+    if (fresh()) { hideBusy(); mark('· сервер не успел за минуту — нажми ещё раз'); }
+  }, 60000);
 
   try {
     const res = await fetch(frameUrl(tc));
@@ -1258,6 +1264,8 @@ function refreshThumbs() {
     }
     offerWindowDownload(error || '');
   };
+  frameUntil = (endSec !== null) ? endSec
+    : (mediaInfo && mediaInfo.duration ? mediaInfo.duration : null);
   if (beyond(startSec)) {
     $('note-start').textContent = '· за концом ролика (' + fmtTC(mediaInfo.duration) + ')';
   } else {
@@ -1838,12 +1846,18 @@ def _reason_is_permanent(reason: str) -> bool:
     return any(sign in text for sign in PERMANENT_REASON_SIGNS)
 
 
-def _window_frame(source: str, cfg: Config, seconds: float, width: int):
+FRAME_WINDOW_BUDGET = 45.0
+
+
+def _window_frame(source: str, cfg: Config, seconds: float, width: int, until=None):
     """Кадр из короткого участка: скачиваем его один раз, дальше всё локально."""
     try:
         resolved = resolve_for_time(source, cfg, seconds)
         if resolved is None:
-            ensure_window(source, cfg, seconds)
+            ensure_window(
+                source, cfg, seconds, until=until,
+                deadline=time.monotonic() + FRAME_WINDOW_BUDGET,
+            )
             resolved = resolve_for_time(source, cfg, seconds)
         if resolved is None:
             return b"", ""
@@ -1884,6 +1898,11 @@ def _preview_error(exc: Exception) -> str:
         return (
             "сайт просит подтвердить, что мы не робот. Это ограничение IP и проходит само: "
             "повтори через 10–15 минут"
+        )
+    if isinstance(exc, TimeoutError) or "не успел" in text:
+        return (
+            "не успел скачать участок для кадров. Сайт сейчас отвечает медленно — "
+            "нажми ещё раз через минуту"
         )
     if unavailable_video(exc):
         return (
@@ -2636,6 +2655,13 @@ def make_handler(
                 return
             if path in ("/api/media", "/api/frame", "/api/source"):
                 query = parse_qs(urlparse(self.path).query)
+                frame_until = None
+                if path == "/api/frame":
+                    try:
+                        raw_until = (query.get("until") or [""])[0]
+                        frame_until = float(raw_until) if raw_until else None
+                    except ValueError:
+                        frame_until = None
                 source = (query.get("source") or [""])[0]
                 raw_t = (query.get("t") or [""])[0]
                 if raw_t:
@@ -2671,7 +2697,9 @@ def make_handler(
                             # Сначала короткий участок: он скачивается один раз
                             # (5–20 с) и дальше отдаёт кадры мгновенно. Поток по
                             # каждому клику — лотерея с таймаутами на медленном CDN.
-                            frame, reason = _window_frame(source, cfg, wanted, frame_width)
+                            frame, reason = _window_frame(
+                                source, cfg, wanted, frame_width, until=frame_until
+                            )
                         if not frame and not _reason_is_permanent(reason):
                             frame, reason = _stream_frame(source, cfg, wanted, frame_width)
                         if not frame:

@@ -473,6 +473,21 @@ class TestDeadLinkHidesDownload:
         assert "/обрезан|недоступн|символ/i.test(error)" in PAGE
 
 
+class TestWindowBudget:
+    """Участок для кадров не должен тянуться бесконечно."""
+
+    def test_timeout_has_a_human_reason(self):
+        from video_clipper.gui import _preview_error
+
+        text = _preview_error(TimeoutError("не успел скачать участок для кадров"))
+        assert "нажми ещё раз" in text
+
+    def test_page_budget_is_30_seconds(self):
+        import video_clipper.gui as gui_module
+
+        assert gui_module.FRAME_WINDOW_BUDGET == 45.0
+
+
 class TestUnavailableVideo:
     """«Видео недоступно» — это не таймаут: причину надо назвать сразу."""
 
@@ -523,7 +538,7 @@ class TestPermanentReasons:
             lambda source, cfg_: {"duration": 0.0, "needs_download": True, "window": False,
                                   "link_problem": ""},
         )
-        monkeypatch.setattr(gui_module, "_window_frame", lambda *a: (b"", self.REASON))
+        monkeypatch.setattr(gui_module, "_window_frame", lambda *a, **k: (b"", self.REASON))
         monkeypatch.setattr(gui_module, "_stream_frame",
                             lambda *a: (stream_calls.append(1), (b"", ""))[1])
         base = server_factory(fake_clipper(cfg.output_dir / "c.mp4"))
@@ -580,14 +595,14 @@ class TestFrameBudget:
         assert gui_module.FRAME_TOTAL_BUDGET == preview.FRAME_TOTAL_BUDGET
         source = open(gui_module.__file__, encoding="utf-8").read()
         # кадр сначала берётся из короткого участка, поток — только если участок не вышел
-        assert "frame, reason = _window_frame(source, cfg, wanted, frame_width)" in source
+        assert "_window_frame(" in source and "until=frame_until" in source
 
     def test_page_gives_up_after_45_seconds(self):
         from video_clipper.gui import PAGE
 
         assert "setTimeout(() => {" in PAGE
-        assert "45000" in PAGE
-        assert "сервер не успел за 45 с — нажми ещё раз" in PAGE
+        assert "60000" in PAGE
+        assert "сервер не успел за минуту — нажми ещё раз" in PAGE
         assert "shortReason(data.error)" in PAGE
 
 
@@ -771,7 +786,7 @@ class TestStreamFallback:
         )
         stream_calls = []
         monkeypatch.setattr(gui_module, "_window_frame",
-                            lambda source, cfg_, seconds, width: (b"\xff\xd8window", ""))
+                            lambda source, cfg_, seconds, width, **kw: (b"\xff\xd8window", ""))
         monkeypatch.setattr(gui_module, "_stream_frame",
                             lambda *a: (stream_calls.append(1), (b"", ""))[1])
         base = server_factory(fake_clipper(cfg.cache_dir / "c.mp4"))
@@ -860,7 +875,7 @@ class TestPreviewForLinks:
             seen.update(seconds=seconds, width=width)
             return b"\xff\xd8\xff\xd9", ""
 
-        monkeypatch.setattr(gui_module, "_window_frame", lambda *a: (b"", ""))
+        monkeypatch.setattr(gui_module, "_window_frame", lambda *a, **k: (b"", ""))
         monkeypatch.setattr(gui_module, "_stream_frame", fake_stream)
         base = server_factory(fake_clipper(cfg.output_dir / "c.mp4"))
         status, body, headers = _get(
