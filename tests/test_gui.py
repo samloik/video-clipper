@@ -1764,15 +1764,64 @@ class TestServiceEndpoints:
             assert response.status == 200
             assert response.headers.get("X-Source-Offset") == "12.000"
 
-    def test_play_uses_the_offset_from_the_server(self):
+    def test_play_asks_one_place_for_file_and_offset(self):
         from video_clipper.gui import PAGE
 
-        assert "X-Source-Offset" in PAGE, "страница должна спрашивать смещение у сервера"
-        assert "method: 'HEAD'" in PAGE
+        # файл и смещение выбираются одним запросом: два запроса давали разные участки
+        assert "/api/preplay?source=" in PAGE
+        assert "play.url" in PAGE and "play.offset" in PAGE
         assert "seekPlayer(localStart, token)" in PAGE
         assert "playerEl.dataset.from" in PAGE
         # мобильные браузеры игнорируют seek, пока файл не готов — нужен повтор
         assert "function seekPlayer" in PAGE and "tries < 10" in PAGE
+        # после await жест теряется: стартуем без звука и включаем его на воспроизведении
+        assert "playerEl.muted = true;" in PAGE
+
+    def test_preplay_pins_the_file_and_its_offset(self, server_factory, cfg, tmp_path):
+        import json as _json
+
+        windows = cfg.cache_dir / "preview"
+        windows.mkdir(parents=True, exist_ok=True)
+        (windows / "window-test.mp4").write_bytes(b"x" * 4096)
+        (windows / "window-test.json").write_text(
+            _json.dumps(
+                {
+                    "source": "https://example.com/fake",
+                    "file": "window-test.mp4",
+                    "start": 12.0,
+                    "end": 32.0,
+                    "duration": 20.0,
+                }
+            ),
+            encoding="utf-8",
+        )
+        base = server_factory(fake_clipper(tmp_path / "c.mp4"))
+
+        status, body = get(
+            base, "/api/preplay?source=https%3A%2F%2Fexample.com%2Ffake&t=24&until=28"
+        )
+        assert status == 200
+        data = json.loads(body)
+        assert data["offset"] == 12.0
+        assert data["start"] == 12.0
+        assert data["url"] == "/api/source?name=window-test.mp4"
+
+    def test_source_serves_a_file_by_name_only_from_work_dirs(self, server_factory, cfg, tmp_path):
+        cfg.cache_dir.mkdir(parents=True, exist_ok=True)
+        (cfg.cache_dir / "gotovyy-клип.mp4").write_bytes(b"x" * 1024)
+        base = server_factory(fake_clipper(tmp_path / "c.mp4"))
+
+        req = urllib.request.Request(
+            base + "/api/source?name=gotovyy-%D0%BA%D0%BB%D0%B8%D0%BF.mp4", method="HEAD"
+        )
+        with urllib.request.urlopen(req) as response:
+            assert response.status == 200
+
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            urllib.request.urlopen(urllib.request.Request(
+                base + "/api/source?name=..%2F..%2Fetc%2Fpasswd", method="HEAD"
+            ))
+        assert exc.value.code == 404
 
     def test_info_is_written_for_the_gui_not_the_chat(self, server_factory, tmp_path):
         base = server_factory(fake_clipper(tmp_path / "c.mp4"))

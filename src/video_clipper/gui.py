@@ -1372,9 +1372,10 @@ async function loadMedia() {
       $('note-end').textContent = '';
       return;
     }
-    $('play-seg').disabled = !!data.needs_download;
+    // Ссылку тоже можно слушать: сервер сам подготовит короткий участок.
+    $('play-seg').disabled = false;
     $('play-seg').title = data.needs_download
-      ? 'проигрывание доступно после первой нарезки: файл останется в кэше'
+      ? 'первое нажатие скачает короткий участок (10–20 с), дальше играет сразу'
       : '';
     if (data.needs_download) {
       // файл не нужен: кадр берётся из потока прямо на сервере
@@ -1533,7 +1534,7 @@ function seekPlayer(target, token) {
   attempt();
 }
 
-$('play-seg').addEventListener('click', () => {
+$('play-seg').addEventListener('click', async () => {
   const source = currentSource();
   if (!source) { setStatus('Сначала выбери файл или ссылку', 'err'); return; }
   const startText = $('start').value.trim() || '0:00';
@@ -1546,59 +1547,53 @@ $('play-seg').addEventListener('click', () => {
     setStatus('Конец должен быть больше начала', 'err');
     return;
   }
-  playerEl.hidden = false;
-  const url = '/api/source?source=' + encodeURIComponent(source) +
-    '&t=' + start.toFixed(2) + '&until=' + end.toFixed(2) + '&_=' + Date.now();
-  // Смещение знает только сервер: отданный файл может начинаться не с нуля
-  // (короткий участок ссылки). Раньше страница ставила currentTime от нуля файла,
-  // и второй «посмотреть отрезок» играл с прежнего места.
-  const infoPromise = fetch(url, { method: 'HEAD' }).then(async res => {
-    if (res.ok) {
-      const raw = res.headers.get('X-Source-Offset');
-      return { offset: raw === null ? NaN : Number(raw) };
-    }
-    let error = '';
-    try { error = (await res.json()).error || ''; } catch (_) {}
-    return { error: error || 'не удалось открыть отрезок' };
-  }).catch(() => ({ offset: NaN }));
-
-  // Каждый показ получает свой токен: ответы прошлого клика не должны двигать новый.
+  // Сервер один раз решает, какой файл играть и с каким смещением. Раньше страница
+  // угадывала смещение из паспорта, а файл мог прийти другой — отрезок играл
+  // с прежнего места при смене начала.
+  previewNoteEl.textContent = 'готовлю отрезок…';
+  let play;
+  try {
+    const res = await fetch('/api/preplay?source=' + encodeURIComponent(source) +
+      '&t=' + start.toFixed(3) + '&until=' + end.toFixed(3) + '&_=' + Date.now());
+    play = await res.json();
+    if (!res.ok) throw new Error(play.error || 'не удалось открыть отрезок');
+  } catch (err) {
+    setStatus(err.message, 'err');
+    previewNoteEl.textContent = '';
+    return;
+  }
+  const offset = Number(play.offset) || 0;
+  const localStart = Math.max(0, start - offset);
+  const localEnd = Math.max(localStart + 0.2, end - offset);
   const token = String(Date.now()) + Math.random();
   playerEl.dataset.token = token;
-  playerEl.onloadedmetadata = async () => {
+  playerEl.dataset.from = String(localStart);
+  playerEl.dataset.to = String(localEnd);
+  playerEl.hidden = false;
+  playerEl.onloadedmetadata = () => {
     if (playerEl.dataset.token !== token) return;
-    const info = await infoPromise;
-    if (playerEl.dataset.token !== token) return;
-    if (info.error) {
-      playerEl.pause();
-      playerEl.hidden = true;
-      setStatus(info.error, 'err');
-      return;
-    }
-    let offset = info.offset;
-    if (!Number.isFinite(offset)) offset = (mediaInfo && mediaInfo.offset) ? mediaInfo.offset : 0;
-    const localStart = Math.max(0, start - offset);
-    const localEnd = Math.max(localStart + 0.2, end - offset);
-    playerEl.dataset.from = String(localStart);
-    playerEl.dataset.to = String(localEnd);
     seekPlayer(localStart, token);
   };
   playerEl.ontimeupdate = () => {
     if (playerEl.dataset.token !== token) return;
-    const localEnd = Number(playerEl.dataset.to || 0);
-    if (localEnd && playerEl.currentTime >= localEnd) {
+    const stop = Number(playerEl.dataset.to || 0);
+    if (stop && playerEl.currentTime >= stop) {
       playerEl.pause();
-      playerEl.currentTime = Math.max(Number(playerEl.dataset.from || 0), localEnd - 0.05);
+      playerEl.currentTime = Math.max(Number(playerEl.dataset.from || 0), stop - 0.05);
     }
   };
-  playerEl.muted = false;
-  playerEl.src = url;
+  // После await браузер уже не считает вызов жестом: стартуем без звука
+  // (это разрешено), а звук включаем, как только воспроизведение пошло.
+  playerEl.muted = true;
+  playerEl.src = play.url + '&_=' + Date.now();
   playerEl.load();
-  // play() зовём прямо в обработчике клика: после await браузер уже не считает это жестом
-  playerEl.play().catch(() => {
+  playerEl.play().then(() => {
+    playerEl.muted = false;
+  }).catch(() => {
+    playerEl.muted = false;
     previewNoteEl.textContent = 'браузер не дал автозапуск — нажми ▶ в плеере';
   });
-  previewNoteEl.textContent = 'проверяю ' + startText + ' – ' + (endText || fmtTC(end)) +
+  previewNoteEl.textContent = 'играю ' + fmtTC(start) + ' – ' + fmtTC(start + (end - start)) +
     ' — это тот же отрезок, что уйдёт в нарезку';
 });
 
@@ -2360,6 +2355,30 @@ def attachment_header(name: str) -> str:
     )
 
 
+def prepare_play(source: str, cfg: Config, wanted: float, until: float | None = None):
+    """Один раз решает, какой файл отдавать для проигрывания и с каким смещением.
+
+    Два независимых запроса (HEAD и сам файл) могли получить разные участки:
+    заголовок со смещением от одного, тело — от другого, и перемотка попадала
+    в чужую шкалу. Поэтому файл выбирается здесь и дальше отдаётся по имени.
+    """
+    resolved = resolve_for_time(source, cfg, wanted)
+    if resolved is None and source.startswith(("http://", "https://")):
+        ensure_window(source, cfg, wanted, until=until)
+        resolved = resolve_for_time(source, cfg, wanted)
+    if resolved is None:
+        return None
+    local, local_time, offset, window_end, is_window = resolved
+    return {
+        "path": Path(local),
+        "name": Path(local).name,
+        "offset": float(offset),
+        "start": float(local_time),
+        "window": bool(is_window),
+        "window_end": float(window_end or 0.0),
+    }
+
+
 def expired_files(cfg: Config) -> list[Path]:
     """Просроченные файлы — только посчитать. Удаляет их отдельная команда."""
     from .storage import expired
@@ -2777,6 +2796,50 @@ def make_handler(
                     return
                 self._send(200, _dumps(info))
                 return
+            if path == "/api/preplay":
+                # Один раз выбираем файл и смещение, чтобы страница играла ровно то,
+                # что ей назвали: иначе HEAD и само видео получали разные участки.
+                query = parse_qs(urlparse(self.path).query)
+                source = (query.get("source") or [""])[0]
+                if not source:
+                    self._error(400, "не указан источник")
+                    return
+                try:
+                    wanted = float((query.get("t") or ["0"])[0] or 0)
+                except (TypeError, ValueError):
+                    self._error(400, "не понял начало отрезка")
+                    return
+                try:
+                    until = float((query.get("until") or [""])[0] or 0) or None
+                except (TypeError, ValueError):
+                    until = None
+                broken = link_problem(source)
+                if broken:
+                    self._error(409, broken)
+                    return
+                try:
+                    play = prepare_play(source, cfg, wanted, until)
+                except Exception as exc:  # noqa: BLE001 - причину показываем текстом
+                    self._error(409, _preview_error(exc))
+                    return
+                if play is None:
+                    self._error(409, "нечего играть: файл не найден")
+                    return
+                info = probe_media(play["path"]) if play["path"].is_file() else {}
+                self._send(
+                    200,
+                    _dumps(
+                        {
+                            "url": "/api/source?name=" + quote(play["name"], safe=""),
+                            "offset": play["offset"],
+                            "start": play["start"],
+                            "window": play["window"],
+                            "duration": info.get("duration") or 0,
+                        }
+                    ),
+                )
+                return
+
             if path in ("/api/media", "/api/frame", "/api/source"):
                 query = parse_qs(urlparse(self.path).query)
                 frame_until = None
@@ -2786,6 +2849,20 @@ def make_handler(
                         frame_until = float(raw_until) if raw_until else None
                     except ValueError:
                         frame_until = None
+                by_name = (query.get("name") or [""])[0]
+                if path == "/api/source" and by_name:
+                    wanted_file = Path(by_name).name
+                    for folder in (cfg.cache_dir, cfg.output_dir):
+                        candidate = Path(folder) / wanted_file
+                        if candidate.is_file() and _allowed_media(candidate, cfg):
+                            self._serve_media(candidate)
+                            return
+                        sub = Path(folder) / "preview" / wanted_file
+                        if sub.is_file() and _allowed_media(sub, cfg):
+                            self._serve_media(sub)
+                            return
+                    self._error(404, "файл не найден")
+                    return
                 source = (query.get("source") or [""])[0]
                 raw_t = (query.get("t") or [""])[0]
                 if raw_t:
