@@ -320,8 +320,49 @@ class TestTimeCommand:
         bot = FakeBot()
         handle_message(bot, cfg, {"chat": {"id": 1}, "text": "/status"})
         text = "\n".join(t for _, t in bot.messages)
-        assert "удалится" in text and " в " in text
-        assert "Хранение: 30 мин" in text
+        assert "удалится в " in text and "через" in text
+        assert "хранение: 30 мин тишины" in text
+
+    def test_status_is_short_and_readable(self, tmp_path):
+        """/status — сводка, а не простыня: пустые каталоги одной строкой."""
+        from video_clipper.bot import build_status
+
+        cfg = self._cfg(tmp_path)
+        cfg.cache_dir.mkdir(parents=True, exist_ok=True)
+        cfg.output_dir.mkdir(parents=True, exist_ok=True)
+        text = build_status(cfg, 1)
+        assert "оригиналы: пусто" in text
+        assert "диск: " in text and "ГБ свободно из" in text
+        assert "файл(ов)" not in text, "канцелярское «файл(ов)» больше не пишем"
+        assert text.count("\n") <= 6
+
+    def test_status_shortens_long_names_and_counts_the_rest(self, tmp_path):
+        from video_clipper.bot import build_status
+
+        cfg = self._cfg(tmp_path)
+        cfg.cache_dir.mkdir(parents=True, exist_ok=True)
+        for i in range(7):
+            (cfg.cache_dir / f"очень-длинное-название-ролика-{i}-89tlUjUJS3Q.mp4").write_bytes(b"x")
+        text = build_status(cfg, 1)
+        assert "…и ещё 2" in text
+        assert text.count("удалится в") == 5
+        assert "89tlUjUJS3Q" not in text.split("\n")[1][:20], "длинные имена обрезаются"
+
+    def test_status_marks_overdue_files(self, tmp_path):
+        import os
+        import time as _time
+
+        from video_clipper.bot import build_status
+
+        cfg = self._cfg(tmp_path)
+        cfg.cache_dir.mkdir(parents=True, exist_ok=True)
+        old = cfg.cache_dir / "старый.mp4"
+        old.write_bytes(b"x")
+        stamp = _time.time() - 5 * 3600
+        os.utime(old, (stamp, stamp))
+        text = build_status(cfg, 1)
+        assert "срок вышел" in text
+        assert "просрочено: 1 файл" in text
 
 
 class TestAttachment:

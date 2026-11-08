@@ -74,7 +74,7 @@ INFO_TEMPLATE = """<b>video-clipper</b> — нарезка по таймкода
 34:43     0:34:43   минуты:секунды
 1:02:03   1:02:03   часы:минуты:секунды
 1:12.500  72.5 с    миллисекунды</pre>
-Вместо «:» подойдёт любой из  , . / \\  — «1/12» это 1 мин 12 с.
+Вместо «:» подойдёт , / \\ — «1/12» это 1 мин 12 с.
 
 <b>ОТРЕЗОК</b>
 <pre>0:10-0:20            с 10-й по 20-ю
@@ -138,6 +138,72 @@ def gui_url(cfg: Config) -> str:
     return f"http://{host}:{cfg.gui_port}/"
 
 
+def _moment(deadline: float) -> str:
+    """«в 04:51» для сегодняшнего срока, иначе с датой — без повторов в каждой строке."""
+    stamp = time.strftime("%d.%m в %H:%M", time.localtime(deadline))
+    today = time.strftime("%d.%m", time.localtime())
+    return "в " + stamp.split(" в ")[1] if stamp.startswith(today) else stamp
+
+
+def _short_name(name: str, limit: int = 30) -> str:
+    return name if len(name) <= limit else name[: limit - 1] + "…"
+
+
+def build_status(cfg: Config, chat_id: int) -> str:
+    """Короткая сводка для чата: что лежит, когда исчезнет, сколько места."""
+    from .storage import describe, free_mb, total_mb
+    from .timecode import format_moment, format_retention, human_duration
+
+    now = time.time()
+    lines: list[str] = []
+    overdue = 0
+    for label, folder in (
+        ("оригиналы", Path(cfg.cache_dir)),
+        ("клипы", Path(cfg.output_dir).expanduser()),
+    ):
+        items = describe(folder, cfg.retention_minutes)
+        if not items:
+            lines.append(f"{label}: пусто")
+            continue
+        size = sum(float(str(item["size"])) for item in items) / 1048576
+        files = _plural(len(items), "файл", "файла", "файлов")
+        lines.append(f"{label}: {len(items)} {files} · {size:.1f} МБ")
+        for item in items[:5]:
+            name = _short_name(str(item["name"]))
+            deadline = float(str(item.get("delete_at") or 0))
+            if deadline and deadline <= now:
+                overdue += 1
+                lines.append(f"· {name} — срок вышел")
+                continue
+            left = max(0.0, deadline - now)
+            lines.append(f"· {name} — удалится {_moment(deadline)} (через {human_duration(left)})")
+        if len(items) > 5:
+            lines.append(f"…и ещё {len(items) - 5}")
+
+    from .source import cookies_path
+
+    cookies = cookies_path(cfg)
+    if cookies and cookies.is_file():
+        age = (time.time() - cookies.stat().st_mtime) / 86400
+        lines.append(f"cookies: обновлены {age:.0f} дн. назад" if age >= 1 else "cookies: обновлены сегодня")
+    else:
+        lines.append("cookies: файла нет — YouTube может требовать авторизацию")
+
+    if overdue:
+        lines.append(f"просрочено: {overdue} {_plural(overdue, 'файл', 'файла', 'файлов')} — /clean удалит всё")
+
+    if chat_id in RETRY_AT:
+        when = time.strftime("%H:%M", time.localtime(RETRY_AT[chat_id]))
+        lines.append(f"повтор запроса отложен до {when} (бот-чек YouTube)")
+
+    out_dir = Path(cfg.output_dir).expanduser()
+    free, total = free_mb(out_dir), total_mb(out_dir)
+    used = round(100 - free / total * 100) if total else 0
+    lines.append(f"диск: {free / 1024:.1f} ГБ свободно из {total / 1024:.1f} ГБ ({used}% занято)")
+    lines.append(f"хранение: {format_retention(cfg.retention_minutes)} тишины · меняется /time")
+    return "\n".join(lines)
+
+
 def build_info(cfg: Config) -> str:
     password = cfg.gui_password_file
     if password and Path(str(password)).expanduser().is_file():
@@ -172,7 +238,7 @@ HELP = (
     "  <ссылка> 0:10-0:20 вертикально фон — 9:16 с размытым фоном\n"
     "  <ссылка> 11-* вертикально сместить 30 — с 11-й до конца, окно левее\n\n"
     "Начало=длительность: 1:00=0:30 — с 1:00 тридцать секунд. Несколько отрезков — через ;\n"
-    "Вместо двоеточия подойдёт , . \\ / — «1/12» это 1 мин 12 с. Подробности — /info\n"
+    "Вместо двоеточия подойдёт , \\ / — «1/12» это 1 мин 12 с. Подробности — /info\n"
     "Слово «fast» отключает перекодирование (быстро, но границы по ключевому кадру).\n"
     "У готового ролика есть кнопки: «⚡ Без перекодирования» — тот же отрезок за секунды\n"
     "из уже скачанного файла, и «📱 Вертикально 9:16» — кадр под смартфон (можно с размытым фоном).\n"
@@ -1085,38 +1151,7 @@ def handle_message(bot, cfg: Config, message: dict, clipper=None) -> None:
         bot.send_message(chat_id, f"chat_id: {chat_id}")
         return
     if command == "/status":
-        lines = []
-        for label, directory in (("оригиналы", cfg.cache_dir), ("клипы", Path(cfg.output_dir))):
-            items = describe(directory, cfg.retention_minutes)
-            total = sum(item["size"] for item in items) / 1048576
-            lines.append(f"{label}: {len(items)} файл(ов), {total:.1f} МБ")
-            for item in items[:10]:
-                delete_at = item.get("delete_at")
-                left_minutes = item.get("left_minutes")
-                when = format_moment(float(delete_at) if isinstance(delete_at, (int, float)) else 0.0)
-                left = float(left_minutes) if isinstance(left_minutes, (int, float)) else 0.0
-                lines.append(f"  · {item['name']} — удалится {when} (через {human_duration(left * 60)})")
-        from .source import cookies_path
-
-        cookies = cookies_path(cfg)
-        if cookies and cookies.is_file():
-            age = (time.time() - cookies.stat().st_mtime) / 86400
-            lines.append(f"cookies: обновлены {age:.1f} дн. назад ({cookies})")
-        else:
-            lines.append("cookies: файла нет — YouTube может требовать авторизацию")
-        if chat_id in RETRY_AT:
-            when = time.strftime("%H:%M", time.localtime(RETRY_AT[chat_id]))
-            lines.append(f"Отложен повтор запроса в {when} (держит бот-чек YouTube)")
-        from .storage import free_mb, total_mb
-
-        out_dir = Path(cfg.output_dir).expanduser()
-        free, total = free_mb(out_dir), total_mb(out_dir)
-        used = round(100 - free / total * 100) if total else 0
-        lines.append(f"Диск: свободно {free / 1024:.1f} ГБ из {total / 1024:.1f} ГБ ({used}%)")
-        lines.append(
-            f"Хранение: {format_retention(cfg.retention_minutes)} тишины; меняется /time"
-        )
-        bot.send_message(chat_id, "\n".join(lines))
+        bot.send_message(chat_id, build_status(cfg, chat_id))
         return
     if command == "/time":
         from .timecode import parse_retention
