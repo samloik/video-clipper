@@ -1964,6 +1964,11 @@ class TestServiceEndpoints:
             _time.sleep(0.05)
         assert json.loads(body)["state"] == "done"
 
+        # старое задание больше не висит в «прервано»: иначе кнопка повторялась бы вечно
+        _, listed = get(base, "/api/jobs")
+        old = [job for job in json.loads(listed)["jobs"] if job["id"] == "oldjob"][0]
+        assert old["state"] == "retried" and old["retried_as"] == new_id
+
     def test_retry_of_a_missing_job_is_404(self, server_factory, cfg, tmp_path):
         base = server_factory(fake_clipper(tmp_path / "c.mp4"))
         status, _ = post_json(base, "/api/jobs/nosuch/retry", {})

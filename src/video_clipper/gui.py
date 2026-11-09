@@ -3466,6 +3466,9 @@ def make_handler(
                     ),
                     daemon=True,
                 ).start()
+                # старое задание больше не «прервано»: повтор уже запущен
+                if STORE is not None:
+                    STORE.upsert(job_id, state="retried", retried_as=new_id)
                 self._send(202, _dumps({"job_id": new_id}))
                 return
 
