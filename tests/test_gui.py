@@ -1888,6 +1888,87 @@ class TestServiceEndpoints:
             ))
         assert exc.value.code == 404
 
+    def test_jobs_endpoint_marks_the_previous_run_as_interrupted(self, server_factory, cfg, tmp_path):
+        import json as _json
+
+        cfg.cache_dir.mkdir(parents=True, exist_ok=True)
+        media = tmp_path / "v.mp4"
+        media.write_bytes(b"x")
+        path = cfg.jobs_path()
+        path.write_text(
+            _json.dumps(
+                {
+                    "jobs": [
+                        {
+                            "id": "oldjob",
+                            "created": 1.0,
+                            "state": "running",
+                            "label": "ролик · 0:10–0:20",
+                            "request": {
+                                "source": str(media),
+                                "segments": [[10.0, 20.0]],
+                                "fast": True,
+                            },
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        base = server_factory(fake_clipper(tmp_path / "c.mp4"))
+
+        status, body = get(base, "/api/jobs")
+        assert status == 200
+        jobs = json.loads(body)["jobs"]
+        assert jobs[0]["id"] == "oldjob"
+        assert jobs[0]["state"] == "interrupted", "задание прошлого запуска не может быть running"
+        assert "перезапуск" in jobs[0]["error"]
+
+    def test_retry_starts_a_new_job_with_the_same_request(self, server_factory, cfg, tmp_path):
+        import json as _json
+        import time as _time
+
+        cfg.cache_dir.mkdir(parents=True, exist_ok=True)
+        media = tmp_path / "v.mp4"
+        media.write_bytes(b"x")
+        cfg.jobs_path().write_text(
+            _json.dumps(
+                {
+                    "jobs": [
+                        {
+                            "id": "oldjob",
+                            "created": 1.0,
+                            "state": "running",
+                            "label": "ролик · 0:10–0:20",
+                            "request": {
+                                "source": str(media),
+                                "segments": [[10.0, 20.0]],
+                                "fast": True,
+                            },
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        base = server_factory(fake_clipper(tmp_path / "c.mp4"))
+
+        status, data = post_json(base, "/api/jobs/oldjob/retry", {})
+        assert status == 202
+        new_id = data["job_id"]
+        assert new_id != "oldjob"
+        for _ in range(50):
+            state, body = get(base, f"/api/jobs/{new_id}")
+            if json.loads(body)["state"] != "running":
+                break
+            _time.sleep(0.05)
+        assert json.loads(body)["state"] == "done"
+
+    def test_retry_of_a_missing_job_is_404(self, server_factory, cfg, tmp_path):
+        base = server_factory(fake_clipper(tmp_path / "c.mp4"))
+        status, _ = post_json(base, "/api/jobs/nosuch/retry", {})
+        assert status == 404
+
     def test_info_is_written_for_the_gui_not_the_chat(self, server_factory, tmp_path):
         base = server_factory(fake_clipper(tmp_path / "c.mp4"))
         status, body = get(base, "/api/info")

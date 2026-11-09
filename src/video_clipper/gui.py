@@ -29,6 +29,7 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from .config import Config, apply_retention_override, load_config
 from .cut import ClipResult, CutCancelled, clamp_horizontal
+from .jobs import JobStore
 from .probe import EnvironmentProblem, check_tools
 from .storage import SweepResult
 from .preview import (
@@ -265,6 +266,12 @@ body{background:var(--bg);color:var(--ink);font:15px/1.5 var(--sans);
   padding:14px 16px}
 .panel[hidden]{display:none}
 .panel .sweep{margin:10px 16px 14px;width:calc(100% - 32px)}
+.resume{display:flex;flex-direction:column;gap:8px;margin:10px 0 2px}
+.resume[hidden]{display:none}
+.resume .row{display:flex;align-items:center;gap:10px;justify-content:space-between;
+  padding:9px 12px;border:1px solid #4a3a20;border-radius:9px;background:#17140f}
+.resume .row span{font-size:12.5px;color:var(--ink-2);min-width:0;text-overflow:ellipsis;
+  overflow:hidden;white-space:nowrap}
 .panel-head{display:flex;align-items:center;justify-content:space-between;gap:12px}
 .panel pre{margin:0;flex:1;min-height:0;overflow:auto;white-space:pre-wrap;
   font:12.5px/1.65 var(--mono);color:var(--ink-2)}
@@ -667,6 +674,7 @@ input::placeholder{color:#78818e}
     </div>
     <div class="status" id="status" role="status" aria-live="polite">Ждёт задание</div>
     <div class="eta" id="eta"></div>
+    <div class="resume" id="resume" hidden></div>
     <ul class="results" id="results"></ul>
     <div class="empty" id="empty">
       <b>Здесь появятся клипы</b>
@@ -846,6 +854,7 @@ function addSweepButton(count) {
 }
 
 $('btn-status').addEventListener('click', openStatus);
+showInterrupted();
 $('btn-info').addEventListener('click', () => openPanel('/api/info', 'Справка'));
 const confirmEl = $('confirm');
 let confirmResolve = null;
@@ -1675,6 +1684,51 @@ $('play-seg').addEventListener('click', async () => {
   }
 });
 
+async function showInterrupted() {
+  try {
+    const res = await fetch('/api/jobs');
+    if (!res.ok) return;
+    const data = await res.json();
+    const broken = (data.jobs || []).filter(job => job.state === 'interrupted');
+    const box = $('resume');
+    if (!broken.length) { box.hidden = true; return; }
+    box.innerHTML = '';
+    broken.slice(0, 3).forEach(job => {
+      const row = document.createElement('div');
+      row.className = 'row';
+      const text = document.createElement('span');
+      text.textContent = (job.label || job.id) + ' · прервано';
+      text.title = job.error || 'сервис перезапускался';
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'ghost';
+      btn.textContent = 'повторить';
+      btn.addEventListener('click', async () => {
+        btn.disabled = true;
+        btn.textContent = 'ставлю…';
+        try {
+          const again = await fetch('/api/jobs/' + encodeURIComponent(job.id) + '/retry', { method: 'POST' });
+          const answer = await again.json();
+          if (!again.ok) throw new Error(answer.error || 'не удалось повторить');
+          setStatus('Повторяю прерванное задание', 'busy');
+          startTimer();
+          await poll(answer.job_id);
+          stopTimer();
+          row.remove();
+          if (!box.children.length) box.hidden = true;
+        } catch (err) {
+          btn.disabled = false;
+          btn.textContent = 'повторить';
+          setStatus(err.message, 'err');
+        }
+      });
+      row.append(text, btn);
+      box.append(row);
+    });
+    box.hidden = false;
+  } catch (err) { /* журнал не критичен для работы */ }
+}
+
 async function run() {
   resultsEl.innerHTML = '';
   emptyEl.style.display = 'none';
@@ -1815,6 +1869,10 @@ async function poll(id) {
 # job_id -> {"state": running|done|error, "results": [...], "error": str, "message": str, "files": [paths]}
 JOBS: dict[str, dict[str, Any]] = {}
 _JOBS_LOCK = threading.Lock()
+# Журнал на диске: то же самое, но переживает перезапуск сервиса.
+STORE: "JobStore | None" = None
+# Что из обновлений задания стоит записывать в журнал (прогресс — нет, он шумный).
+_RECORD_KEYS = ("state", "error", "results", "files", "label", "request")
 
 
 class JobControl:
@@ -1846,7 +1904,57 @@ class JobControl:
         self.event.clear()
 
 
-def _new_job() -> str:
+def init_jobs(cfg: Config) -> JobStore:
+    """Поднять журнал заданий и честно закрыть то, что не пережило перезапуск."""
+    global STORE
+
+    store = JobStore(cfg.jobs_path())
+    store.load()
+    store.mark_interrupted("сервис перезапускался — задание прервано, его можно повторить")
+    STORE = store
+    return store
+
+
+def _record(job_id: str, **kwargs: Any) -> None:
+    if STORE is None:
+        return
+    fields = {key: value for key, value in kwargs.items() if key in _RECORD_KEYS}
+    if fields:
+        STORE.upsert(job_id, **fields)
+
+
+def _segments_for_record(segments: list["Segment"]) -> list[list[float | None]]:
+    from .segments import is_open_end
+
+    return [[seg.start, None if is_open_end(seg) else seg.end] for seg in segments]
+
+
+def _segments_from_record(raw: Any) -> list["Segment"]:  # noqa: F811 - тип только для аннотации
+    from .segments import OPEN_END, Segment
+
+    result: list[Segment] = []
+    for item in raw or []:
+        if not isinstance(item, (list, tuple)) or len(item) != 2:
+            continue
+        start, end = item
+        result.append(Segment(float(start), OPEN_END if end is None else float(end)))
+    return result
+
+
+def _job_label(source: str, segments: list["Segment"]) -> str:
+    """Короткая строка для панели прерванных: источник и отрезок."""
+    tail = source.rstrip("/").rsplit("/", 1)[-1]
+    if len(tail) > 28:
+        tail = tail[:27] + "…"
+    if not segments:
+        return tail
+    spans = "; ".join(seg.label for seg in segments[:3])
+    if len(segments) > 3:
+        spans += f" и ещё {len(segments) - 3}"
+    return f"{tail} · {spans}"
+
+
+def _new_job(request: dict[str, Any] | None = None) -> str:
     job_id = uuid.uuid4().hex[:12]
     with _JOBS_LOCK:
         JOBS[job_id] = {
@@ -1860,12 +1968,15 @@ def _new_job() -> str:
             "files": [],
             "control": JobControl(),
         }
+    if request:
+        _record(job_id, state="running", created=time.time(), **request)
     return job_id
 
 
 def _job_update(job_id: str, **kwargs: Any) -> None:
     with _JOBS_LOCK:
         JOBS.setdefault(job_id, {}).update(kwargs)
+    _record(job_id, **kwargs)
 
 
 def _job_snapshot(job_id: str) -> dict[str, Any] | None:
@@ -2842,6 +2953,11 @@ def make_handler(
                     _dumps({"text": status_text(cfg), "expired": len(expired_files(cfg))}),
                 )
                 return
+            if path == "/api/jobs":
+                items = STORE.snapshot(20) if STORE is not None else []
+                self._send(200, _dumps({"jobs": items}))
+                return
+
             if path in ("/api/vertical", "/api/vertical/auto"):
                 source = (parse_qs(urlparse(self.path).query).get("source") or [""])[0]
                 if path == "/api/vertical/auto":
@@ -3295,6 +3411,65 @@ def make_handler(
                 self._send(200, _dumps({"path": str(target), "name": name}))
                 return
 
+            if parsed.path.startswith("/api/jobs/") and parsed.path.endswith("/retry"):
+                job_id = parsed.path[len("/api/jobs/") : -len("/retry")].strip("/")
+                record = STORE.get(job_id) if STORE is not None else None
+                if not record:
+                    self._error(404, "такого задания в журнале нет")
+                    return
+                request = record.get("request") or {}
+                source = str(request.get("source") or "")
+                segments = _segments_from_record(request.get("segments"))
+                if not source or not segments:
+                    self._error(400, "в журнале не сохранились параметры задания")
+                    return
+                if not is_url(source) and not Path(source).expanduser().is_file():
+                    self._error(
+                        409,
+                        f"файл источника больше нет: {source} — сначала загрузи его заново",
+                    )
+                    return
+                try:
+                    validate_segments(segments, duration=None, allow_overlap=True)
+                except ValueError as exc:
+                    self._error(400, str(exc))
+                    return
+                vertical = bool(request.get("vertical", False))
+                layout = str(request.get("layout") or "crop")
+                horizontal = clamp_horizontal(request.get("horizontal", 0.5))
+                fast_flag = bool(request.get("fast", False))
+                new_id = _new_job(
+                    {
+                        "label": _job_label(source, segments),
+                        "request": {
+                            "source": source,
+                            "segments": _segments_for_record(segments),
+                            "fast": fast_flag,
+                            "vertical": vertical,
+                            "layout": layout,
+                            "horizontal": horizontal,
+                        },
+                    }
+                )
+                threading.Thread(
+                    target=_run_job,
+                    args=(
+                        new_id,
+                        source,
+                        segments,
+                        fast_flag,
+                        cfg,
+                        clipper,
+                        vertical,
+                        layout,
+                        horizontal,
+                    ),
+                    daemon=True,
+                ).start()
+                self._send(202, _dumps({"job_id": new_id}))
+                return
+
+
             if parsed.path == "/api/clip":
                 try:
                     data = json.loads(body or b"{}")
@@ -3338,14 +3513,27 @@ def make_handler(
                 if not is_url(source) and not Path(source).expanduser().is_file():
                     self._error(400, f"файл не найден: {source}")
                     return
-                job_id = _new_job()
+                fast_flag = bool(data.get("fast", False))
+                job_id = _new_job(
+                    {
+                        "label": _job_label(source, segments),
+                        "request": {
+                            "source": source,
+                            "segments": _segments_for_record(segments),
+                            "fast": fast_flag,
+                            "vertical": vertical,
+                            "layout": layout,
+                            "horizontal": horizontal,
+                        },
+                    }
+                )
                 threading.Thread(
                     target=_run_job,
                     args=(
                         job_id,
                         source,
                         segments,
-                        bool(data.get("fast", False)),
+                        fast_flag,
                         cfg,
                         clipper,
                         vertical,
@@ -3393,6 +3581,8 @@ def create_server(
             f"GUI на {bind_host} без пароля запрещён. Создай файл с паролем и укажи его "
             f"в конфиге: gui_password_file, либо задай VIDEO_CLIPPER_GUI_PASSWORD."
         )
+    # Журнал заданий: после перезапуска вчерашние «running» станут «interrupted».
+    init_jobs(cfg)
     httpd = ThreadingHTTPServer(
         (bind_host, bind_port), make_handler(cfg, clipper, Auth(password, cfg.gui_secret_file))
     )

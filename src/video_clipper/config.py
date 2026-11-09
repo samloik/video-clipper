@@ -84,6 +84,7 @@ class Config:
     auto_clean_free_mb: int = 2000
     history_file: Path | None = None
     vertical_positions_file: Path | None = None
+    jobs_file: Path | None = None
 
     def vertical_map_path(self) -> Path | None:
         """Remembered 9:16 window positions, per source."""
@@ -100,6 +101,14 @@ class Config:
         if self.config_path is None:
             return None
         return self.config_path.parent / "history.jsonl"
+
+    def jobs_path(self) -> Path | None:
+        """Журнал заданий: очередь должна переживать перезапуск сервиса."""
+        if self.jobs_file is not None:
+            return self.jobs_file
+        if self.config_path is None:
+            return None
+        return self.config_path.parent / "jobs.json"
 
     def retention_file(self) -> Path | None:
         """Where a runtime override of retention_minutes lives."""
