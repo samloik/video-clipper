@@ -67,7 +67,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--subs",
         help="файл субтитров исходного ролика (.srt или .vtt): реплики отрезка "
-        "выжигаются в кадр, таймкоды сдвигаются к началу клипа",
+        "идут в клип, таймкоды сдвигаются к началу",
+    )
+    p.add_argument(
+        "--subs-mode",
+        choices=("burn", "soft"),
+        default=None,
+        help="burn — выжечь текст в кадр (по умолчанию), soft — отдельная дорожка "
+        "mov_text: включается и выключается в плеере, видео можно копировать без перекодирования",
     )
     p.add_argument("--keep-source", action="store_true", help="сохранить скачанный оригинал в cache/")
     p.add_argument("--output-dir", help="каталог для готовых фрагментов")

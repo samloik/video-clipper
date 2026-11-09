@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from video_clipper.cut import (
     build_ffmpeg_command,
     subtitle_filter,
@@ -83,3 +85,64 @@ class TestPathEscaping:
     def test_style_is_passed_through(self):
         expr = subtitle_filter("/tmp/x.srt", "FontSize=20")
         assert expr.endswith("force_style='FontSize=20'")
+
+
+class TestSoftTrack:
+    """Мягкая дорожка: текст отдельным потоком, картинка не перекодируется."""
+
+    def test_soft_adds_a_second_input_and_maps_tracks(self):
+        cmd = _cmd(subtitles="/tmp/sub.srt", subs_mode="soft")
+        assert cmd.count("-i") == 2, "видео и файл субтитров"
+        assert cmd[cmd.index("/tmp/sub.srt") - 1] == "-i"
+        assert ["-map", "0:v:0"] == cmd[cmd.index("-map") : cmd.index("-map") + 2]
+        assert "-map" in cmd and "1:0" in cmd
+        assert "mov_text" in cmd
+
+    def test_soft_does_not_burn_anything_into_the_picture(self):
+        cmd = _cmd(subtitles="/tmp/sub.srt", subs_mode="soft")
+        assert "-vf" not in cmd, "фильтра выжигания быть не должно"
+        assert "-filter_complex" not in cmd
+
+    def test_soft_with_fast_copies_the_video(self):
+        cmd = _cmd(subtitles="/tmp/sub.srt", subs_mode="soft", fast=True)
+        assert "-c" in cmd and _value_after(cmd, "-c") == "copy"
+        assert _value_after(cmd, "-c:s") == "mov_text", "субтитры всё равно упаковываем"
+
+    def test_soft_without_fast_re_encodes_but_keeps_subtitles(self):
+        cmd = _cmd(subtitles="/tmp/sub.srt", subs_mode="soft")
+        assert _value_after(cmd, "-c:v") == "libx264"
+        assert _value_after(cmd, "-c:s") == "mov_text"
+
+    def test_soft_in_vertical_keeps_crop_and_subtitle_track(self):
+        cmd = _cmd(subtitles="/tmp/sub.srt", subs_mode="soft", vertical=True,
+                   layout="crop", vertical_size=(720, 1280))
+        chain = _value_after(cmd, "-vf")
+        assert "crop=" in chain
+        assert "subtitles=" not in " ".join(cmd), "в мягком режиме текст не рисуется в кадр"
+        assert _value_after(cmd, "-c:s") == "mov_text"
+
+    def test_subtitle_input_comes_before_t(self):
+        """-t после -i субтитров стал бы его опцией и обрезал бы дорожку."""
+        cmd = _cmd(subtitles="/tmp/sub.srt", subs_mode="soft")
+        assert cmd.index("/tmp/sub.srt") < cmd.index("-t")
+
+    def test_track_is_default_and_named(self):
+        cmd = _cmd(subtitles="/tmp/sub.srt", subs_mode="soft")
+        assert ["-disposition:s:0", "default"] == cmd[
+            cmd.index("-disposition:s:0") : cmd.index("-disposition:s:0") + 2
+        ]
+        assert "title=Субтитры" in cmd
+
+    def test_burn_mode_is_still_the_default(self):
+        cmd = _cmd(subtitles="/tmp/sub.srt")
+        assert cmd.count("-i") == 1
+        assert "subtitles=filename=" in _value_after(cmd, "-vf")
+        assert "mov_text" not in cmd
+
+    def test_mode_string_tells_soft_from_burn(self):
+        from video_clipper.cut import clip_mode
+
+        assert clip_mode(True, False, "crop", "/tmp/s.srt", "soft") == "fast+subs-soft"
+        assert clip_mode(True, False, "crop", "/tmp/s.srt", "burn") == "accurate+subs"
+        assert clip_mode(True, True, "blur", "/tmp/s.srt", "soft") == "accurate+vertical-blur+subs-soft"
+        assert clip_mode(True, False, "crop", None, "burn") == "fast"

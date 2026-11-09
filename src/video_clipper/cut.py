@@ -174,6 +174,21 @@ def subtitle_style(height: int | None = None, vertical: bool = False) -> str:
     )
 
 
+def clip_mode(
+    fast: bool, vertical: bool, layout: str, subtitles: object, subs_mode: str = "burn"
+) -> str:
+    """Строка режима для лога и отчёта: fast/accurate + vertical + subs."""
+    hard_subs = bool(subtitles) and subs_mode != "soft"
+    mode = "fast" if fast and not vertical and not hard_subs else "accurate"
+    if vertical:
+        mode += "+vertical" if layout != "blur" else "+vertical-blur"
+    if hard_subs:
+        mode += "+subs"
+    elif subtitles:
+        mode += "+subs-soft"
+    return mode
+
+
 def build_ffmpeg_command(
     src: str | Path,
     out: str | Path,
@@ -188,12 +203,16 @@ def build_ffmpeg_command(
     subtitles: str | Path | None = None,
     subtitle_style_str: str | None = None,
     subtitle_height: int | None = None,
+    subs_mode: str = "burn",
 ) -> list[str]:
     """Build the ffmpeg argv for one segment.
 
     ``-ss`` before ``-i`` keeps seeking fast; with re-encoding it is still
     frame accurate because everything from the seek point is decoded.
     """
+    # Мягкая дорожка: текст лежит отдельным потоком, картинку не портит и
+    # позволяет включить/выключить субтитры в плеере.
+    soft = bool(subtitles) and subs_mode == "soft"
     cmd = [
         ffmpeg_path,
         "-hide_banner",
@@ -202,29 +221,50 @@ def build_ffmpeg_command(
         "-y",
         "-ss", f"{seg.start:.3f}",
         "-i", str(src),
-        "-t", f"{seg.duration:.3f}",
     ]
+    if soft:
+        # Файл субтитров уже сдвинут к нулю отрезка, поэтому его не ищем: -ss
+        # касается только видео. Ставим его ДО -t, иначе -t станет его опцией.
+        cmd += ["-i", str(subtitles)]
+    cmd += ["-t", f"{seg.duration:.3f}"]
     style = None
-    if subtitles:
+    if subtitles and not soft:
         # выжигание текста — всегда перекодирование, даже если просили fast
         style = subtitle_style_str or subtitle_style(
             subtitle_height or (vertical_size[1] if vertical else None), vertical
         )
-    if fast and not vertical and not subtitles:
+    if soft:
+        # Дорожки надо выбрать вручную: по умолчанию ffmpeg может взять
+        # субтитры из первого входа или потерять звук.
+        cmd += ["-map", "0:v:0"]
+        cmd += (["-map", "0:a?"] if has_audio else [])
+        cmd += ["-map", "1:0"]
+    if fast and not vertical and not (subtitles and not soft):
         cmd += FAST_ARGS
+        if soft:
+            cmd += ["-c:s", "mov_text"]
     else:
         # Vertical mode always re-encodes: cropping cannot be stream-copied.
         cmd += ACCURATE_VIDEO_ARGS
-        burn = subtitle_filter(subtitles, style) if subtitles else ""
+        burn = subtitle_filter(subtitles, style) if (subtitles and not soft) else ""
         if vertical:
             cmd += vertical_args(layout, vertical_size, horizontal, burn=burn)
         elif burn:
             cmd += ["-vf", burn]
         cmd += ACCURATE_AUDIO_ARGS if has_audio else ["-an"]
+        if soft:
+            cmd += ["-c:s", "mov_text"]
         # Re-encoded output may start at a negative PTS offset; zero it.
         # With -c copy this option inflates the duration by the seek offset,
         # so it is applied only for re-encoding.
         cmd += ["-avoid_negative_ts", "make_zero"]
+    if soft:
+        # Трек по умолчанию: человек попросил субтитры — пусть сразу видны.
+        cmd += [
+            "-metadata:s:s:0", "title=Субтитры",
+            "-metadata:s:s:0", "language=rus",
+            "-disposition:s:0", "default",
+        ]
     cmd += ["-movflags", "+faststart", str(out)]
     return cmd
 
@@ -474,6 +514,7 @@ def cut_segment(
     subtitles: str | Path | None = None,
     subtitle_style_str: str | None = None,
     subtitle_height: int | None = None,
+    subs_mode: str = "burn",
 ) -> ClipResult:
     """Run ffmpeg for one segment and return the result."""
     out_path = Path(out)
@@ -492,12 +533,9 @@ def cut_segment(
         subtitles=subtitles,
         subtitle_style_str=subtitle_style_str,
         subtitle_height=subtitle_height,
+        subs_mode=subs_mode,
     )
-    mode = "fast" if fast and not vertical and not subtitles else "accurate"
-    if vertical:
-        mode += "+vertical" if layout != "blur" else "+vertical-blur"
-    if subtitles:
-        mode += "+subs"
+    mode = clip_mode(fast, vertical, layout, subtitles, subs_mode)
     log.info("Нарезка %s: %s → %s", mode, seg.label, out_path.name)
     log.debug("ffmpeg: %s", " ".join(cmd))
 

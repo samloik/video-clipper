@@ -147,6 +147,7 @@ def run_pipeline(args: Any, cfg: Config) -> list[ClipResult]:
                 horizontal=horizontal,
                 subtitles=segment_subs,
                 subtitle_height=size[1] if vertical else src.info.height,
+                subs_mode=getattr(args, "subs_mode", None) or "burn",
             )
             result.segment = shown
             results.append(result)
