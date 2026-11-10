@@ -77,6 +77,15 @@ class TestBurnFilters:
         assert chain.index("overlay=") < chain.index("subtitles="), "текст поверх подложки"
 
 
+class TestStartTime:
+    def test_no_negative_ts_flag_in_accurate_mode(self):
+        """Флаг сдвигал клип на 80 мс: start_time 0.080 вместо 0.000."""
+        for kwargs in ({}, {"subtitles": "/tmp/sub.srt"}, {"subtitles": "/tmp/sub.srt", "subs_mode": "soft"},
+                       {"vertical": True, "layout": "blur", "vertical_size": (720, 1280)}):
+            cmd = _cmd(**kwargs)
+            assert "-avoid_negative_ts" not in cmd, kwargs
+
+
 class TestPathEscaping:
     def test_colon_and_quotes_are_escaped(self):
         expr = subtitle_filter("/tmp/a:b/c'd.srt")

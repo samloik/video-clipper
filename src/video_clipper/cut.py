@@ -254,10 +254,11 @@ def build_ffmpeg_command(
         cmd += ACCURATE_AUDIO_ARGS if has_audio else ["-an"]
         if soft:
             cmd += ["-c:s", "mov_text"]
-        # Re-encoded output may start at a negative PTS offset; zero it.
-        # With -c copy this option inflates the duration by the seek offset,
-        # so it is applied only for re-encoding.
-        cmd += ["-avoid_negative_ts", "make_zero"]
+        # Здесь раньше стоял -avoid_negative_ts make_zero. Он сдвигал готовый клип
+        # на 80 мс (два кадра при 25 fps) и удлинял его ровно на столько же:
+        # с флагом start_time 0.080 и duration 7.080, без него 0.000 и 7.000.
+        # С -c copy флаг и вовсе раздувал длительность на величину перемотки,
+        # поэтому без него mp4-муксер сам ставит edit list и всё сходится.
     if soft:
         # Трек по умолчанию: человек попросил субтитры — пусть сразу видны.
         cmd += [
